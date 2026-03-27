@@ -1,0 +1,26 @@
+# docker-compose.yml — Vitodata Streaming Dictation
+# Deploy on p2aisv01 (172.17.16.150)
+#
+# Run: docker compose up -d --build
+# Test: http://172.17.16.150:8003
+#
+# Uses host networking so it can reach:
+#   - GPUStack proxy at localhost:8000 (routes to Whisper on GPU 0 + Mistral on GPUs 6+7)
+
+services:
+  streaming-dictation:
+    build: .
+    container_name: vitodata-streaming-dictation
+    restart: unless-stopped
+    # Host networking: localhost works for Whisper (8001) and GPUStack (8000)
+    network_mode: host
+    environment:
+      # Whisper ASR — GPUStack proxy (GPU 0, vLLM backend) — use port 8000, not dynamic container port
+      - WHISPER_API_URL=http://localhost:8000/v1/audio/transcriptions
+      - WHISPER_MODEL=whisper-large-v3-turbo
+      - WHISPER_LANGUAGE=de
+      # LLM correction — Mistral Small 3.2 24B via GPUStack on GPUs 6+7
+      - LLM_API_URL=http://localhost:8000/v1/chat/completions
+      - LLM_API_KEY=${GPUSTACK_API_KEY:-gpustack_bab7076d66f90f98_d937d1f7db12829b844d6f918f995cdc}
+      - LLM_MODEL=Mistral-Small-3.2-24B-Instruct-2506
+      - LLM_CORRECTION_ENABLED=true

@@ -1,0 +1,27 @@
+{
+  "css.lint.unknownAtRules": "ignore",
+  "python.analysis.useLibraryCodeForTypes": false,
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.autoImportCompletions": false,
+  "npm.autoDetect": "off",
+  "typescript.tsc.autoDetect": "off",
+  "typescript.tsserver.maxTsServerMemory": 2048,
+  "typescript.disableAutomaticTypeAcquisition": true,
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/frontend/.next": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/frontend/.next/**": true
+  },
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/frontend/.next": true
+  },
+  "task.autoDetect": "off",
+  "extensions.ignoreRecommendations": true,
+  "eslint.workingDirectories": [
+    { "directory": "./frontend", "changeProcessCWD": true }
+  ]
+}

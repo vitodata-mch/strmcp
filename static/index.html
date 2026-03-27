@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vitodata – Live Diktat</title>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface-2: #242836;
+            --border: #2e3345;
+            --text: #e4e6ef;
+            --text-dim: #7a7f95;
+            --accent: #4c9aff;
+            --accent-glow: rgba(76, 154, 255, 0.15);
+            --provisional: #f0a050;
+            --provisional-glow: rgba(240, 160, 80, 0.1);
+            --danger: #ff5c5c;
+            --success: #4cda8b;
+        }
+
+        body {
+            font-family: 'IBM Plex Sans', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .header h1 {
+            font-weight: 300;
+            font-size: 1.6rem;
+            letter-spacing: 0.04em;
+            color: var(--text);
+        }
+
+        .header h1 span {
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .header p {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            margin-top: 0.3rem;
+        }
+
+        /* Main dictation area */
+        .dictation-container {
+            width: 100%;
+            max-width: 720px;
+        }
+
+        /* Target field selector — simulates choosing which field to dictate into */
+        .field-selector {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .field-btn {
+            padding: 0.4rem 0.9rem;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-dim);
+            font-family: inherit;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .field-btn:hover { border-color: var(--accent); color: var(--text); }
+        .field-btn.active {
+            background: var(--accent-glow);
+            border-color: var(--accent);
+            color: var(--accent);
+            font-weight: 500;
+        }
+
+        /* Transcription output */
+        .transcription-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            min-height: 200px;
+            margin-bottom: 1.5rem;
+            position: relative;
+            transition: border-color 0.3s;
+        }
+
+        .transcription-box.recording {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 1px var(--accent), 0 0 20px var(--accent-glow);
+        }
+
+        .transcription-box .label {
+            position: absolute;
+            top: -0.55rem;
+            left: 1rem;
+            background: var(--surface);
+            padding: 0 0.5rem;
+            font-size: 0.7rem;
+            font-weight: 500;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .transcription-text {
+            font-size: 1.05rem;
+            line-height: 1.7;
+            min-height: 120px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .transcription-text .confirmed {
+            color: var(--text);
+        }
+
+        .transcription-text .provisional {
+            color: var(--provisional);
+            font-style: italic;
+            position: relative;
+        }
+
+        .transcription-text .provisional::after {
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: var(--provisional);
+            opacity: 0.3;
+        }
+
+        .cursor-blink {
+            display: inline-block;
+            width: 2px;
+            height: 1.1em;
+            background: var(--accent);
+            vertical-align: text-bottom;
+            animation: blink 1s step-end infinite;
+            margin-left: 2px;
+        }
+
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+
+        .placeholder {
+            color: var(--text-dim);
+            font-style: italic;
+            font-size: 0.95rem;
+        }
+
+        /* Controls */
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .record-btn {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: 2px solid var(--border);
+            background: var(--surface-2);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            position: relative;
+        }
+
+        .record-btn:hover {
+            border-color: var(--accent);
+            transform: scale(1.05);
+        }
+
+        .record-btn .icon {
+            width: 20px;
+            height: 20px;
+            background: var(--danger);
+            border-radius: 50%;
+            transition: all 0.2s;
+        }
+
+        .record-btn.recording .icon {
+            border-radius: 3px;
+            width: 16px;
+            height: 16px;
+            background: var(--danger);
+        }
+
+        .record-btn.recording {
+            border-color: var(--danger);
+            box-shadow: 0 0 0 3px rgba(255, 92, 92, 0.15);
+            animation: pulse-ring 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse-ring {
+            0%, 100% { box-shadow: 0 0 0 3px rgba(255, 92, 92, 0.15); }
+            50% { box-shadow: 0 0 0 6px rgba(255, 92, 92, 0.08); }
+        }
+
+        .status-text {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+        }
+
+        .status-text.recording { color: var(--danger); font-weight: 500; }
+        .status-text.connected { color: var(--success); }
+        .status-text.error { color: var(--danger); }
+
+        /* Audio level meter */
+        .level-meter {
+            display: flex;
+            gap: 2px;
+            align-items: flex-end;
+            height: 24px;
+        }
+
+        .level-bar {
+            width: 3px;
+            background: var(--accent);
+            border-radius: 1px;
+            transition: height 0.05s;
+            min-height: 2px;
+        }
+
+        /* Stats bar */
+        .stats {
+            display: flex;
+            gap: 1.5rem;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            padding: 0.8rem 1rem;
+            background: var(--surface);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+
+        .stats .stat-label { opacity: 0.6; margin-right: 0.3rem; }
+        .stats .stat-value { font-weight: 500; font-variant-numeric: tabular-nums; }
+
+        /* Legend */
+        .legend {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 1rem;
+            font-size: 0.78rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .legend-dot.confirmed { background: var(--text); }
+        .legend-dot.provisional { background: var(--provisional); }
+
+        /* Clear button */
+        .clear-btn {
+            margin-left: auto;
+            padding: 0.3rem 0.7rem;
+            border-radius: 5px;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-dim);
+            font-family: inherit;
+            font-size: 0.78rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .clear-btn:hover { border-color: var(--danger); color: var(--danger); }
+
+        /* Upload area */
+        .upload-area {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        .upload-btn {
+            padding: 0.45rem 1rem;
+            border-radius: 6px;
+            border: 1px dashed var(--border);
+            background: var(--surface);
+            color: var(--text-dim);
+            font-family: inherit;
+            font-size: 0.82rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .upload-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .upload-btn.uploading { border-color: var(--provisional); color: var(--provisional); cursor: wait; }
+
+        .upload-filename {
+            font-size: 0.78rem;
+            color: var(--text-dim);
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><span>vitodata</span> · Live Diktat</h1>
+        <p>Streaming-Transkription mit Sliding-Window-Whisper &amp; Selbstkorrektur</p>
+    </div>
+
+    <div class="dictation-container">
+        <!-- Field selector (simulates SOAP fields) -->
+        <div class="field-selector">
+            <button class="field-btn active" data-field="subjective">S · Subjektiv</button>
+            <button class="field-btn" data-field="objective">O · Objektiv</button>
+            <button class="field-btn" data-field="assessment">A · Beurteilung</button>
+            <button class="field-btn" data-field="plan">P · Plan</button>
+        </div>
+
+        <!-- Legend -->
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-dot confirmed"></div>
+                <span>Bestätigt</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-dot provisional"></div>
+                <span>Provisorisch (kann sich noch ändern)</span>
+            </div>
+            <button class="clear-btn" id="clearBtn">Löschen</button>
+        </div>
+
+        <!-- Transcription display -->
+        <div class="transcription-box" id="transcriptionBox">
+            <div class="label" id="fieldLabel">S · Subjektiv</div>
+            <div class="transcription-text" id="transcriptionText">
+                <span class="placeholder">Klicke auf den roten Knopf und beginne zu sprechen...</span>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls">
+            <button class="record-btn" id="recordBtn">
+                <div class="icon"></div>
+            </button>
+            <div>
+                <div class="status-text" id="statusText">Bereit</div>
+            </div>
+            <div class="level-meter" id="levelMeter">
+                <!-- bars generated by JS -->
+            </div>
+        </div>
+
+        <!-- WAV Upload -->
+        <div class="upload-area">
+            <input type="file" id="wavInput" accept=".wav,.mp3,.ogg,.m4a,.flac" style="display:none">
+            <button class="upload-btn" id="uploadBtn">WAV hochladen</button>
+            <span class="upload-filename" id="uploadFilename"></span>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats">
+            <div>
+                <span class="stat-label">Dauer:</span>
+                <span class="stat-value" id="statDuration">0.0s</span>
+            </div>
+            <div>
+                <span class="stat-label">Chunks:</span>
+                <span class="stat-value" id="statChunks">0</span>
+            </div>
+            <div>
+                <span class="stat-label">Whisper-Aufrufe:</span>
+                <span class="stat-value" id="statCalls">0</span>
+            </div>
+            <div>
+                <span class="stat-label">Verbindung:</span>
+                <span class="stat-value" id="statConnection">getrennt</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // =====================================================================
+        // State
+        // =====================================================================
+        let socket = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let workletNode = null;
+        let isRecording = false;
+        let chunkCount = 0;
+        let whisperCalls = 0;
+        let recordingStart = null;
+        let durationInterval = null;
+        let activeField = 'subjective';
+
+        // Store text per field
+        const fieldTexts = {
+            subjective: { confirmed: '', provisional: '' },
+            objective: { confirmed: '', provisional: '' },
+            assessment: { confirmed: '', provisional: '' },
+            plan: { confirmed: '', provisional: '' },
+        };
+
+        // DOM
+        const recordBtn = document.getElementById('recordBtn');
+        const statusText = document.getElementById('statusText');
+        const transcriptionBox = document.getElementById('transcriptionBox');
+        const transcriptionText = document.getElementById('transcriptionText');
+        const fieldLabel = document.getElementById('fieldLabel');
+        const clearBtn = document.getElementById('clearBtn');
+        const statDuration = document.getElementById('statDuration');
+        const statChunks = document.getElementById('statChunks');
+        const statCalls = document.getElementById('statCalls');
+        const statConnection = document.getElementById('statConnection');
+        const levelMeter = document.getElementById('levelMeter');
+
+        // Create level meter bars
+        for (let i = 0; i < 12; i++) {
+            const bar = document.createElement('div');
+            bar.className = 'level-bar';
+            bar.style.height = '2px';
+            levelMeter.appendChild(bar);
+        }
+
+        // =====================================================================
+        // Socket.IO Connection
+        // =====================================================================
+        function connectSocket() {
+            // Connect to same host the page is served from
+            const url = window.location.origin;
+            socket = io(url, {
+                transports: ['websocket'],
+                reconnection: true,
+            });
+
+            socket.on('connect', () => {
+                console.log('Connected to dictation server');
+                statConnection.textContent = 'verbunden';
+                statusText.textContent = 'Verbunden — bereit';
+                statusText.className = 'status-text connected';
+            });
+
+            socket.on('disconnect', () => {
+                console.log('Disconnected');
+                statConnection.textContent = 'getrennt';
+                statusText.textContent = 'Verbindung getrennt';
+                statusText.className = 'status-text error';
+                if (isRecording) stopRecording();
+            });
+
+            socket.on('dictation_started', () => {
+                console.log('Dictation session started on server');
+            });
+
+            socket.on('transcription', (data) => {
+                whisperCalls++;
+                statCalls.textContent = whisperCalls;
+                updateTranscription(data.confirmed, data.provisional, data.is_final);
+            });
+        }
+
+        // =====================================================================
+        // Audio Capture
+        // =====================================================================
+        async function startRecording() {
+            try {
+                // Get microphone access
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                    }
+                });
+
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(mediaStream);
+
+                // Use ScriptProcessorNode (widely supported) for PCM extraction
+                // bufferSize 4096 at 16kHz ≈ 256ms per chunk
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                let sending = false;  // gate: don't send until we detect audio above threshold
+
+                processor.onaudioprocess = (e) => {
+                    if (!isRecording) return;
+
+                    const float32 = e.inputBuffer.getChannelData(0);
+
+                    // Update level meter
+                    updateLevelMeter(float32);
+
+                    // Calculate RMS to detect if there's meaningful audio
+                    let sum = 0;
+                    for (let i = 0; i < float32.length; i++) sum += float32[i] * float32[i];
+                    const rms = Math.sqrt(sum / float32.length);
+
+                    // Gate: start sending once we detect audio > threshold
+                    if (!sending && rms > 0.01) {
+                        sending = true;
+                        console.log('Audio detected, starting to send chunks');
+                    }
+
+                    if (!sending) return;
+
+                    // Convert float32 [-1,1] to int16 PCM bytes
+                    const int16 = new Int16Array(float32.length);
+                    for (let i = 0; i < float32.length; i++) {
+                        const s = Math.max(-1, Math.min(1, float32[i]));
+                        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    }
+
+                    // Send as raw bytes
+                    socket.emit('audio_chunk', int16.buffer);
+                    chunkCount++;
+                    statChunks.textContent = chunkCount;
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                // Tell server to start
+                socket.emit('start_dictation', { field: activeField });
+
+                isRecording = true;
+                chunkCount = 0;
+                whisperCalls = 0;
+                recordingStart = Date.now();
+                statChunks.textContent = '0';
+                statCalls.textContent = '0';
+
+                recordBtn.classList.add('recording');
+                transcriptionBox.classList.add('recording');
+                statusText.textContent = 'Aufnahme läuft...';
+                statusText.className = 'status-text recording';
+
+                // Duration timer
+                durationInterval = setInterval(() => {
+                    const elapsed = ((Date.now() - recordingStart) / 1000).toFixed(1);
+                    statDuration.textContent = elapsed + 's';
+                }, 100);
+
+            } catch (err) {
+                console.error('Mic access failed:', err);
+                statusText.textContent = 'Mikrofon-Zugriff fehlgeschlagen';
+                statusText.className = 'status-text error';
+            }
+        }
+
+        function stopRecording() {
+            isRecording = false;
+
+            // Tell server to stop and do final transcription
+            if (socket && socket.connected) {
+                socket.emit('stop_dictation');
+            }
+
+            // Clean up audio
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(t => t.stop());
+                mediaStream = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+
+            clearInterval(durationInterval);
+            recordBtn.classList.remove('recording');
+            transcriptionBox.classList.remove('recording');
+            statusText.textContent = 'Gestoppt';
+            statusText.className = 'status-text';
+
+            // Reset level meter
+            levelMeter.querySelectorAll('.level-bar').forEach(b => b.style.height = '2px');
+        }
+
+        // =====================================================================
+        // Level Meter
+        // =====================================================================
+        function updateLevelMeter(float32) {
+            // Simple FFT-free level visualization: split into bands and measure RMS
+            const bars = levelMeter.querySelectorAll('.level-bar');
+            const bandSize = Math.floor(float32.length / bars.length);
+
+            for (let i = 0; i < bars.length; i++) {
+                let sum = 0;
+                const start = i * bandSize;
+                for (let j = start; j < start + bandSize && j < float32.length; j++) {
+                    sum += float32[j] * float32[j];
+                }
+                const rms = Math.sqrt(sum / bandSize);
+                // Scale to pixels (max 24px)
+                const height = Math.max(2, Math.min(24, rms * 500));
+                bars[i].style.height = height + 'px';
+            }
+        }
+
+        // =====================================================================
+        // Transcription Display
+        // =====================================================================
+        function updateTranscription(confirmed, provisional, isFinal) {
+            // Store in field state
+            fieldTexts[activeField].confirmed = confirmed;
+            fieldTexts[activeField].provisional = isFinal ? '' : provisional;
+
+            renderTranscription();
+        }
+
+        function renderTranscription() {
+            const ft = fieldTexts[activeField];
+            const hasText = ft.confirmed || ft.provisional;
+
+            if (!hasText) {
+                transcriptionText.innerHTML = '<span class="placeholder">Klicke auf den roten Knopf und beginne zu sprechen...</span>';
+                return;
+            }
+
+            let html = '';
+            if (ft.confirmed) {
+                html += `<span class="confirmed">${escapeHtml(ft.confirmed)}</span>`;
+            }
+            if (ft.provisional) {
+                if (ft.confirmed) html += ' ';
+                html += `<span class="provisional">${escapeHtml(ft.provisional)}</span>`;
+            }
+            if (isRecording) {
+                html += '<span class="cursor-blink"></span>';
+            }
+
+            transcriptionText.innerHTML = html;
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // =====================================================================
+        // Field Selector
+        // =====================================================================
+        document.querySelectorAll('.field-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (isRecording) return; // Don't switch fields while recording
+
+                document.querySelectorAll('.field-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                activeField = btn.dataset.field;
+                fieldLabel.textContent = btn.textContent;
+                renderTranscription();
+            });
+        });
+
+        // =====================================================================
+        // Controls
+        // =====================================================================
+        recordBtn.addEventListener('click', () => {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        });
+
+        clearBtn.addEventListener('click', () => {
+            fieldTexts[activeField].confirmed = '';
+            fieldTexts[activeField].provisional = '';
+            renderTranscription();
+        });
+
+        // Keyboard shortcut: Space to toggle recording
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Space' && e.target === document.body) {
+                e.preventDefault();
+                recordBtn.click();
+            }
+        });
+
+        // =====================================================================
+        // WAV Upload
+        // =====================================================================
+        const wavInput = document.getElementById('wavInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const uploadFilename = document.getElementById('uploadFilename');
+
+        uploadBtn.addEventListener('click', () => wavInput.click());
+
+        wavInput.addEventListener('change', async () => {
+            const file = wavInput.files[0];
+            if (!file) return;
+
+            uploadFilename.textContent = file.name;
+            uploadBtn.classList.add('uploading');
+            uploadBtn.textContent = 'Wird transkribiert...';
+
+            try {
+                const form = new FormData();
+                form.append('file', file);
+
+                const resp = await fetch('/v1/transcribe', { method: 'POST', body: form });
+                const data = await resp.json();
+
+                if (data.status === 'ok') {
+                    fieldTexts[activeField].confirmed = data.text;
+                    fieldTexts[activeField].provisional = '';
+                    renderTranscription();
+                    uploadFilename.textContent = file.name + ' \u2714';
+                } else {
+                    uploadFilename.textContent = 'Fehler: ' + (data.error || 'unbekannt');
+                }
+            } catch (err) {
+                uploadFilename.textContent = 'Upload fehlgeschlagen: ' + err.message;
+            } finally {
+                uploadBtn.classList.remove('uploading');
+                uploadBtn.textContent = 'WAV hochladen';
+                wavInput.value = '';
+            }
+        });
+
+        // =====================================================================
+        // Init
+        // =====================================================================
+        connectSocket();
+    </script>
+</body>
+</html>

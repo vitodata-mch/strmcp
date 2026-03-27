@@ -1,0 +1,272 @@
+@import "tailwindcss";
+
+/* ─── Tailwind v4: map CSS vars → color tokens ───────────────────────────── */
+@theme inline {
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, monospace;
+
+  /* shadcn base tokens */
+  --color-background:             var(--background);
+  --color-foreground:             var(--foreground);
+  --color-card:                   var(--card);
+  --color-card-foreground:        var(--card-foreground);
+  --color-popover:                var(--popover);
+  --color-popover-foreground:     var(--popover-foreground);
+  --color-primary:                var(--primary);
+  --color-primary-foreground:     var(--primary-foreground);
+  --color-secondary:              var(--secondary);
+  --color-secondary-foreground:   var(--secondary-foreground);
+  --color-muted:                  var(--muted);
+  --color-muted-foreground:       var(--muted-foreground);
+  --color-accent:                 var(--accent-ui);
+  --color-accent-foreground:      var(--accent-ui-foreground);
+  --color-destructive:            var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border:                 var(--border);
+  --color-input:                  var(--input);
+  --color-ring:                   var(--ring);
+
+  /* custom tokens for dictation UI */
+  --color-surface:                var(--surface);
+  --color-surface-2:              var(--surface-2);
+  --color-text-dim:               var(--text-dim);
+  --color-theme-accent:           var(--theme-accent);
+  --color-provisional:            var(--provisional);
+  --color-danger:                 var(--danger);
+  --color-success:                var(--success);
+
+  /* radius scale */
+  --radius-sm:  calc(var(--radius) - 4px);
+  --radius-md:  var(--radius);
+  --radius-lg:  calc(var(--radius) + 4px);
+  --radius-xl:  calc(var(--radius) + 8px);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* OBSIDIAN — Arctic Glass: near-black + ice blue / violet shimmer            */
+/* ─────────────────────────────────────────────────────────────────────────── */
+:root,
+[data-theme="obsidian"] {
+  /* layout */
+  --background:             #040810;
+  --foreground:             #e8f4ff;
+  --surface:                rgba(255, 255, 255, 0.045);
+  --surface-2:              rgba(255, 255, 255, 0.075);
+  --border:                 rgba(200, 225, 255, 0.13);
+  --input:                  rgba(255, 255, 255, 0.07);
+  --text-dim:               #94a3b8;
+  --radius:                 0.625rem;
+
+  /* accent */
+  --theme-accent:           #7dd3fc;
+  --accent-glow:            rgba(125, 211, 252, 0.22);
+  --ring:                   #7dd3fc;
+
+  /* semantic */
+  --provisional:            #fcd34d;
+  --danger:                 #f87171;
+  --success:                #6ee7b7;
+
+  /* shadcn tokens */
+  --card:                   rgba(255, 255, 255, 0.035);
+  --card-foreground:        #e8f4ff;
+  --popover:                rgba(10, 16, 32, 0.92);
+  --popover-foreground:     #e8f4ff;
+  --primary:                #7dd3fc;
+  --primary-foreground:     #040810;
+  --secondary:              rgba(255, 255, 255, 0.07);
+  --secondary-foreground:   #e8f4ff;
+  --muted:                  rgba(255, 255, 255, 0.05);
+  --muted-foreground:       #94a3b8;
+  --accent-ui:              rgba(255, 255, 255, 0.07);
+  --accent-ui-foreground:   #e8f4ff;
+  --destructive:            #f87171;
+  --destructive-foreground: #fafafa;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* SARDINIA — Glacial Sea: deep ocean + cyan / teal / aquamarine              */
+/* ─────────────────────────────────────────────────────────────────────────── */
+[data-theme="sardinia"] {
+  /* layout */
+  --background:             #020c18;
+  --foreground:             #d4f1ff;
+  --surface:                rgba(255, 255, 255, 0.05);
+  --surface-2:              rgba(255, 255, 255, 0.08);
+  --border:                 rgba(180, 240, 255, 0.14);
+  --input:                  rgba(255, 255, 255, 0.07);
+  --text-dim:               #67e8f9;
+  --radius:                 0.625rem;
+
+  /* accent */
+  --theme-accent:           #22d3ee;
+  --accent-glow:            rgba(34, 211, 238, 0.25);
+  --ring:                   #22d3ee;
+
+  /* semantic */
+  --provisional:            #fde68a;
+  --danger:                 #f87171;
+  --success:                #34d399;
+
+  /* shadcn tokens */
+  --card:                   rgba(255, 255, 255, 0.04);
+  --card-foreground:        #d4f1ff;
+  --popover:                rgba(2, 12, 28, 0.94);
+  --popover-foreground:     #d4f1ff;
+  --primary:                #22d3ee;
+  --primary-foreground:     #020c18;
+  --secondary:              rgba(255, 255, 255, 0.07);
+  --secondary-foreground:   #d4f1ff;
+  --muted:                  rgba(255, 255, 255, 0.05);
+  --muted-foreground:       #67e8f9;
+  --accent-ui:              rgba(255, 255, 255, 0.07);
+  --accent-ui-foreground:   #d4f1ff;
+  --destructive:            #f87171;
+  --destructive-foreground: #fafafa;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* FOREST — Aurora Glass: deep black + emerald / violet / teal northern lights */
+/* ─────────────────────────────────────────────────────────────────────────── */
+[data-theme="forest"] {
+  /* layout */
+  --background:             #020a06;
+  --foreground:             #dcfce7;
+  --surface:                rgba(255, 255, 255, 0.04);
+  --surface-2:              rgba(255, 255, 255, 0.07);
+  --border:                 rgba(180, 255, 200, 0.12);
+  --input:                  rgba(255, 255, 255, 0.06);
+  --text-dim:               #86efac;
+  --radius:                 0.625rem;
+
+  /* accent */
+  --theme-accent:           #4ade80;
+  --accent-glow:            rgba(74, 222, 128, 0.22);
+  --ring:                   #4ade80;
+
+  /* semantic */
+  --provisional:            #fde68a;
+  --danger:                 #f87171;
+  --success:                #34d399;
+
+  /* shadcn tokens */
+  --card:                   rgba(255, 255, 255, 0.035);
+  --card-foreground:        #dcfce7;
+  --popover:                rgba(2, 10, 6, 0.94);
+  --popover-foreground:     #dcfce7;
+  --primary:                #4ade80;
+  --primary-foreground:     #020a06;
+  --secondary:              rgba(255, 255, 255, 0.06);
+  --secondary-foreground:   #dcfce7;
+  --muted:                  rgba(255, 255, 255, 0.04);
+  --muted-foreground:       #86efac;
+  --accent-ui:              rgba(255, 255, 255, 0.06);
+  --accent-ui-foreground:   #dcfce7;
+  --destructive:            #f87171;
+  --destructive-foreground: #fafafa;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* Base                                                                        */
+/* ─────────────────────────────────────────────────────────────────────────── */
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans, Arial, Helvetica, sans-serif);
+  transition: background-color 0.4s ease, color 0.25s ease;
+}
+
+/* ─── Streaming pulse bars — common animation, only duration/delay vary ──── */
+.stream-bar {
+  animation-name: pulse;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+
+/* ─── True frosted glass — all themes ──────────────────────────────────────── */
+[data-slot="card"] {
+  backdrop-filter: blur(28px) saturate(1.8) brightness(1.06);
+  -webkit-backdrop-filter: blur(28px) saturate(1.8) brightness(1.06);
+  box-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.35),
+    0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.15) inset;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* OBSIDIAN: Arctic multi-color background                                     */
+/* bottom-left cyan · top-right violet · top-center navy · bottom-center blue */
+/* ─────────────────────────────────────────────────────────────────────────── */
+:root body,
+[data-theme="obsidian"] body {
+  background-image:
+    radial-gradient(ellipse 110% 75% at -8%  100%, rgba(14,  165, 233, 0.24) 0%, transparent 52%),
+    radial-gradient(ellipse  80% 60% at 108%  -5%, rgba(139,  92, 246, 0.18) 0%, transparent 52%),
+    radial-gradient(ellipse  65% 45% at  50% 110%, rgba( 59, 130, 246, 0.15) 0%, transparent 55%),
+    radial-gradient(ellipse  55% 40% at  15%  10%, rgba(186, 230, 253, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse  40% 30% at  85%  85%, rgba( 99, 102, 241, 0.08) 0%, transparent 45%);
+}
+
+:root [data-slot="card"],
+[data-theme="obsidian"] [data-slot="card"] {
+  background-image: linear-gradient(
+    145deg,
+    rgba(125, 211, 252, 0.06) 0%,
+    rgba(139,  92, 246, 0.03) 50%,
+    rgba(125, 211, 252, 0.02) 100%
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* SARDINIA: Glacial sea — cyan + teal + sky + deep turquoise                 */
+/* ─────────────────────────────────────────────────────────────────────────── */
+[data-theme="sardinia"] body {
+  background-image:
+    radial-gradient(ellipse 120% 70% at  -5%  90%, rgba(  6, 182, 212, 0.26) 0%, transparent 52%),
+    radial-gradient(ellipse  80% 55% at 105%  10%, rgba( 56, 189, 248, 0.20) 0%, transparent 52%),
+    radial-gradient(ellipse  70% 50% at  40%  -5%, rgba( 14, 116, 144, 0.14) 0%, transparent 55%),
+    radial-gradient(ellipse  55% 40% at  75%  95%, rgba( 34, 211, 238, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse  40% 30% at  50%  50%, rgba(  2,  94, 115, 0.06) 0%, transparent 50%);
+}
+
+[data-theme="sardinia"] [data-slot="card"] {
+  background-image: linear-gradient(
+    145deg,
+    rgba( 34, 211, 238, 0.07) 0%,
+    rgba(  6, 182, 212, 0.04) 50%,
+    rgba( 56, 189, 248, 0.03) 100%
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* FOREST: Aurora borealis — emerald + violet + teal shimmer                  */
+/* ─────────────────────────────────────────────────────────────────────────── */
+[data-theme="forest"] body {
+  background-image:
+    radial-gradient(ellipse 110% 65% at  -5%  80%, rgba( 16, 185, 129, 0.22) 0%, transparent 52%),
+    radial-gradient(ellipse  75% 55% at 105%  25%, rgba(139,  92, 246, 0.16) 0%, transparent 52%),
+    radial-gradient(ellipse  65% 45% at  50% 105%, rgba( 20, 184, 166, 0.14) 0%, transparent 55%),
+    radial-gradient(ellipse  50% 35% at  20%  -5%, rgba( 52, 211, 153, 0.10) 0%, transparent 50%),
+    radial-gradient(ellipse  40% 30% at  80%  80%, rgba(167, 243, 208, 0.06) 0%, transparent 45%);
+}
+
+[data-theme="forest"] [data-slot="card"] {
+  background-image: linear-gradient(
+    145deg,
+    rgba( 74, 222, 128, 0.07) 0%,
+    rgba(139,  92, 246, 0.03) 50%,
+    rgba( 52, 211, 153, 0.02) 100%
+  );
+}
+
+/* ─── Animations ─────────────────────────────────────────────────────────── */
+@keyframes pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(248,  113, 113, 0.14); }
+  50%       { box-shadow: 0 0 0 8px rgba(248,  113, 113, 0.04); }
+}
+
+@keyframes pulse {
+  from { opacity: 0.35; transform: scaleY(0.5); }
+  to   { opacity: 1;    transform: scaleY(1);   }
+}

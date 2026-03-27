@@ -1,0 +1,14 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-socketio==5.12.1
+aiohttp==3.11.11
+numpy==2.2.1
+torch==2.5.1
+torchaudio==2.5.1
+python-multipart==0.0.20
+python-dotenv==1.0.1
+python-socketio[client]==5.12.1
+pyperclip==1.9.0
+keyboard==0.13.5
+PyAudio==0.2.14
+numpy==2.2.1

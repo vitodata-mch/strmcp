@@ -1,0 +1,38 @@
+node_modules
+frontend/node_modules/
+
+# Audio files
+*.wav
+*.mp3
+*.ogg
+
+frontend/.next/
+frontend/out/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment
+.env
+.env.local
+.env*.local
+
+# Claude local settings
+.claude/settings.local.json
+
+# Logs and temp output
+debug.log
+*.log
+syntax_result.txt
+
+# Context/handoff docs
+vitodata-live-dictation-complete-context_1.md
+
+# OS
+.DS_Store
+Thumbs.db
+
