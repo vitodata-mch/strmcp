@@ -17,10 +17,10 @@ services:
     environment:
       # Whisper ASR — GPUStack proxy (GPU 0, vLLM backend) — use port 8000, not dynamic container port
       - WHISPER_API_URL=http://localhost:8000/v1/audio/transcriptions
-      - WHISPER_MODEL=whisper-large-v3-turbo
+      - WHISPER_MODEL=whisper-large-v3-turbo-nvidia
       - WHISPER_LANGUAGE=de
       # LLM correction — Mistral Small 3.2 24B via GPUStack on GPUs 6+7
       - LLM_API_URL=http://localhost:8000/v1/chat/completions
       - LLM_API_KEY=${GPUSTACK_API_KEY:-gpustack_bab7076d66f90f98_d937d1f7db12829b844d6f918f995cdc}
-      - LLM_MODEL=Mistral-Small-3.2-24B-Instruct-2506
+      - LLM_MODEL=mistral-small-3.2-24b-instruct-2506-nvfp4
       - LLM_CORRECTION_ENABLED=true
