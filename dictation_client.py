@@ -25,8 +25,11 @@ German umlauts, special chars, and any Unicode perfectly.
 import sys
 import time
 import threading
-import socketio
+
+import numpy as np
+import pyaudio
 import pyperclip
+import socketio
 import keyboard  # for global hotkeys and simulating Ctrl+V
 
 # ---------------------------------------------------------------------------
@@ -43,9 +46,6 @@ HOTKEY_QUIT = "F9"      # press to quit the app
 sio = socketio.Client(reconnection=True)
 is_dictating = False
 confirmed_buffer = ""   # tracks what we've already typed
-import pyaudio
-import struct
-import numpy as np
 
 # Audio recording settings (must match server expectations)
 SAMPLE_RATE = 16000

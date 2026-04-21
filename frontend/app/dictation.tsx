@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useDictation, SoapField, SoapScores, CompareTranscript } from "@/lib/use-dictation";
+import { useDictation, SoapField, SoapScores, CompareTranscript, VoiceCommand, TranscriptCorrection } from "@/lib/use-dictation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { ThemeSwitcher } from "@/components/theme-switcher";
+import { Lock } from "lucide-react";
 
 const SOAP_LABELS: Record<SoapField, { short: string; label: string }> = {
   subjective:  { short: "S", label: "Subjektiv" },
@@ -80,7 +81,73 @@ function computeWordDiff(textA: string, textB: string): DiffSegment[] {
   return segments;
 }
 
-function DiffView({ comparison }: { comparison: CompareTranscript }) {
+/* ─── Transcript with correction highlights ──────────────────────────── */
+
+function renderTranscriptWithCorrections(
+  text: string,
+  corrections: TranscriptCorrection[],
+  showCorrections: boolean,
+  editingId: string | null,
+  setEditingId: (id: string | null) => void,
+  onRevert: (id: string) => void,
+  onEdit: (id: string, val: string) => void,
+): React.ReactNode {
+  if (!showCorrections || !corrections.length) {
+    return <span className="text-foreground">{text}</span>;
+  }
+
+  // Sort corrections by offset, filter to those within text bounds
+  const sorted = [...corrections]
+    .filter((c) => c.offset >= 0 && c.offset + c.corrected.length <= text.length)
+    .sort((a, b) => a.offset - b.offset);
+
+  if (!sorted.length) return <span className="text-foreground">{text}</span>;
+
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+
+  for (const c of sorted) {
+    if (c.offset < cursor) continue; // overlapping correction, skip
+    if (c.offset > cursor) {
+      nodes.push(<span key={`t-${cursor}`} className="text-foreground">{text.slice(cursor, c.offset)}</span>);
+    }
+    const end = c.offset + c.corrected.length;
+    if (editingId === c.id) {
+      nodes.push(
+        <input
+          key={`e-${c.id}`}
+          autoFocus
+          defaultValue={c.corrected}
+          className="rounded border border-theme-accent bg-background px-1 text-sm"
+          onBlur={(e) => { onEdit(c.id, e.target.value); setEditingId(null); }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { onEdit(c.id, e.currentTarget.value); setEditingId(null); }
+            if (e.key === "Escape") setEditingId(null);
+          }}
+        />
+      );
+    } else {
+      nodes.push(
+        <span
+          key={`c-${c.id}`}
+          className="rounded bg-theme-accent/15 text-theme-accent underline decoration-dotted cursor-pointer hover:bg-theme-accent/25 transition-colors"
+          title={`Korrigiert von: "${c.original}" — Klick: rückgängig, Doppelklick: bearbeiten`}
+          onClick={() => onRevert(c.id)}
+          onDoubleClick={() => setEditingId(c.id)}
+        >
+          {c.corrected}
+        </span>
+      );
+    }
+    cursor = end;
+  }
+  if (cursor < text.length) {
+    nodes.push(<span key={`t-end`} className="text-foreground">{text.slice(cursor)}</span>);
+  }
+  return <>{nodes}</>;
+}
+
+function DiffView({ comparison, onClear }: { comparison: CompareTranscript; onClear?: () => void }) {
   const segments = computeWordDiff(comparison.confirmed_a, comparison.confirmed_b);
   const hasDiff = segments.some((s) => s.type !== "same");
 
@@ -97,7 +164,16 @@ function DiffView({ comparison }: { comparison: CompareTranscript }) {
           <span className="text-muted-foreground">Nur {comparison.model_b}</span>
         </span>
         {!hasDiff && (
-          <span className="ml-auto text-xs text-success">Identisch ✔</span>
+          <span className="text-xs text-success">Identisch ✔</span>
+        )}
+        {onClear && (
+          <button
+            onClick={onClear}
+            className="ml-auto text-xs text-muted-foreground hover:text-danger transition-colors"
+            title="Vergleich löschen"
+          >
+            Vergleich löschen
+          </button>
         )}
       </div>
 
@@ -172,6 +248,46 @@ type FileState =
 
 const CUSTOM_AGENTS_KEY = "dictation_custom_agents";
 
+// Built-in voice commands (mirrors server.py VOICE_COMMANDS — informational only)
+const BUILTIN_VC: { spoken: string; replacement: string }[] = [
+  { spoken: "punkt",          replacement: "." },
+  { spoken: "komma",          replacement: "," },
+  { spoken: "doppelpunkt",    replacement: ":" },
+  { spoken: "semikolon",      replacement: ";" },
+  { spoken: "fragezeichen",   replacement: "?" },
+  { spoken: "ausrufezeichen", replacement: "!" },
+  { spoken: "neue zeile",     replacement: "\n" },
+  { spoken: "neuer absatz",   replacement: "\n\n" },
+  { spoken: "bindestrich",    replacement: "-" },
+  { spoken: "schrägstrich",   replacement: "/" },
+  { spoken: "klammer auf",    replacement: "(" },
+  { spoken: "klammer zu",     replacement: ")" },
+];
+
+// Built-in action commands (mirrors server.py ACTION_COMMANDS)
+const BUILTIN_ACTIONS = [
+  "mach einen bericht",
+  "erstelle bericht",
+  "bericht erstellen",
+  "generiere bericht",
+  "soap erstellen",
+  "soap note erstellen",
+  "zeige soap",
+];
+
+const VC_PRESET_REPLACEMENTS = [
+  { label: ". (Punkt)",       value: "." },
+  { label: ", (Komma)",       value: "," },
+  { label: ": (Doppelpunkt)", value: ":" },
+  { label: "↵ (Neue Zeile)",  value: "\n" },
+  { label: "↵↵ (Absatz)",     value: "\n\n" },
+  { label: "Eigener Text…",   value: "__custom__" },
+];
+
+function displayReplacement(r: string): string {
+  return r.replace(/\n\n/g, "↵↵").replace(/\n/g, "↵");
+}
+
 function loadCustomAgents(): { id: string; name: string }[] {
   try {
     return JSON.parse(localStorage.getItem(CUSTOM_AGENTS_KEY) ?? "[]");
@@ -196,6 +312,24 @@ export default function DictationPage() {
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [newAgentId, setNewAgentId] = useState("");
   const [newAgentName, setNewAgentName] = useState("");
+
+  // Voice commands panel
+  const [showVcPanel, setShowVcPanel] = useState(false);
+  const [newVcSpoken, setNewVcSpoken] = useState("");
+  const [newVcReplacement, setNewVcReplacement] = useState(".");
+  const [newVcCustomText, setNewVcCustomText] = useState("");
+
+  // Correction inline-edit state + Shift-held to reveal highlights
+  const [editingCorrectionId, setEditingCorrectionId] = useState<string | null>(null);
+  const [shiftHeld, setShiftHeld] = useState(false);
+
+  useEffect(() => {
+    const onDown = (e: KeyboardEvent) => { if (e.key === "Shift") setShiftHeld(true); };
+    const onUp   = (e: KeyboardEvent) => { if (e.key === "Shift") setShiftHeld(false); };
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup",   onUp);
+    return () => { window.removeEventListener("keydown", onDown); window.removeEventListener("keyup", onUp); };
+  }, []);
 
   // Load custom agents from localStorage on mount
   useEffect(() => {
@@ -227,6 +361,24 @@ export default function DictationPage() {
     if (d.selectedAgent === id) d.setSelectedAgent(allAgents.find((a) => a.id !== id)?.id ?? "");
   };
 
+  const handleAddVoiceCommand = () => {
+    const spoken = newVcSpoken.trim().toLowerCase();
+    if (!spoken) return;
+    const replacement = newVcReplacement === "__custom__" ? newVcCustomText : newVcReplacement;
+    if (!replacement) return;
+    const updated: VoiceCommand[] = [
+      ...d.voiceCommands.filter((c) => c.spoken !== spoken),
+      { spoken, replacement },
+    ];
+    d.setVoiceCommands(updated);
+    setNewVcSpoken("");
+    setNewVcCustomText("");
+  };
+
+  const handleRemoveVoiceCommand = (spoken: string) => {
+    d.setVoiceCommands(d.voiceCommands.filter((c) => c.spoken !== spoken));
+  };
+
   const busy         = d.recording || d.streaming;
   const hasTranscript = !!(d.transcript.confirmed || d.transcript.provisional || d.fullText);
   const hasConfirmed  = !!(d.transcript.confirmed.trim() || d.fullText.trim());
@@ -253,7 +405,7 @@ export default function DictationPage() {
   };
 
   const handleGenerateSOAP = async () => {
-    const text = d.transcript.confirmed;
+    const text = d.fullText || d.transcript.confirmed;
     if (!text.trim()) return;
     setSoapLoading(true);
     setSoapError("");
@@ -398,21 +550,21 @@ export default function DictationPage() {
               </p>
             ) : (
               <p className="whitespace-pre-wrap text-[1.05rem] leading-7">
-                {/* Full accumulated text (dimmer, already confirmed across windows) */}
-                {d.fullText && d.fullText !== d.transcript.confirmed && (
-                  <span className="text-foreground/70">{d.fullText} </span>
-                )}
-                {/* Current window confirmed (if different from fullText) */}
-                {d.transcript.confirmed && (
-                  <span className="text-foreground">
-                    {d.fullText && d.fullText !== d.transcript.confirmed
-                      ? ""
-                      : d.transcript.confirmed}
-                  </span>
-                )}
+                {/* Full accumulated text with correction highlights */}
+                {d.fullText ? renderTranscriptWithCorrections(
+                  d.fullText,
+                  d.corrections,
+                  shiftHeld,
+                  editingCorrectionId,
+                  setEditingCorrectionId,
+                  d.revertCorrection,
+                  d.editCorrection,
+                ) : d.transcript.confirmed ? (
+                  <span className="text-foreground">{d.transcript.confirmed}</span>
+                ) : null}
                 {d.transcript.provisional && (
                   <>
-                    {(d.transcript.confirmed || d.fullText) ? " " : ""}
+                    {" "}
                     <span className="text-provisional italic underline decoration-provisional/30 underline-offset-4">
                       {d.transcript.provisional}
                     </span>
@@ -436,6 +588,11 @@ export default function DictationPage() {
             <span className="inline-block h-2 w-2 rounded-full bg-provisional" />
             Provisorisch
           </span>
+          {d.corrections.length > 0 && (
+            <span className={`text-[10px] transition-colors ${shiftHeld ? "text-theme-accent" : "text-muted-foreground/60"}`}>
+              {shiftHeld ? "●" : "○"} {d.corrections.length} KI-Korrektur{d.corrections.length !== 1 ? "en" : ""} — Shift halten
+            </span>
+          )}
 
           <div className="ml-auto flex items-center gap-2">
             {/* Whisper-only toggle */}
@@ -488,7 +645,22 @@ export default function DictationPage() {
               </Button>
             )}
 
-            {/* Clear button */}
+            {/* Voice commands panel toggle */}
+            <Button
+              type="button"
+              variant={showVcPanel ? "default" : "outline"}
+              size="sm"
+              className={`text-xs ${
+                showVcPanel
+                  ? "bg-theme-accent text-background hover:bg-theme-accent/80"
+                  : "border-border text-muted-foreground hover:border-theme-accent hover:text-theme-accent"
+              }`}
+              onClick={() => setShowVcPanel((v) => !v)}
+            >
+              Sprachbefehle
+            </Button>
+
+            {/* Clear transcript button */}
             <Button
               variant="ghost"
               size="sm"
@@ -498,11 +670,163 @@ export default function DictationPage() {
             >
               Löschen
             </Button>
+
+            {/* Clear all button */}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-xs text-muted-foreground hover:text-danger"
+              onClick={d.clearAll}
+              disabled={(!hasConfirmed && !d.comparison) || busy}
+            >
+              Alles löschen
+            </Button>
           </div>
         </div>
 
         {/* Comparison diff view */}
-        {d.compareMode && d.comparison && <DiffView comparison={d.comparison} />}
+        {d.compareMode && d.comparison && <DiffView comparison={d.comparison} onClear={d.clearComparison} />}
+
+        {/* Voice commands panel */}
+        {showVcPanel && (
+          <div className="space-y-4 rounded-lg border border-dashed border-theme-accent/40 bg-theme-accent/5 px-4 py-4">
+            <h3 className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
+              Sprachbefehle
+            </h3>
+
+            {/* Built-in replacement commands */}
+            <div className="space-y-1.5">
+              <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
+                Integriert — Ersetzungen
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {BUILTIN_VC.map((cmd) => (
+                  <span
+                    key={cmd.spoken}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-0.5 text-xs text-muted-foreground"
+                  >
+                    <span className="font-medium text-foreground/70">{cmd.spoken}</span>
+                    <span className="text-text-dim">→</span>
+                    <span className="font-mono">{displayReplacement(cmd.replacement)}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {/* Built-in action commands */}
+            <div className="space-y-1.5">
+              <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
+                Integriert — Aktionen (löst SOAP-Generierung aus)
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {BUILTIN_ACTIONS.map((cmd) => (
+                  <span
+                    key={cmd}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-theme-accent/30 bg-theme-accent/5 px-2 py-0.5 text-xs text-theme-accent"
+                  >
+                    {cmd} → SOAP
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {/* Custom commands */}
+            {d.voiceCommands.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
+                  Eigene Befehle
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {d.voiceCommands.map((cmd) => (
+                    <span
+                      key={cmd.spoken}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-0.5 text-xs"
+                    >
+                      <span className="font-medium text-foreground">{cmd.spoken}</span>
+                      <span className="text-text-dim">→</span>
+                      <span className="font-mono text-foreground/80">{displayReplacement(cmd.replacement)}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveVoiceCommand(cmd.spoken)}
+                        className="ml-0.5 text-muted-foreground/50 hover:text-danger"
+                        aria-label={`Befehl '${cmd.spoken}' entfernen`}
+                      >✕</button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Diff hotkey config */}
+            <div className="flex items-center gap-2 border-t border-border pt-3 text-xs text-muted-foreground">
+              <span>Diff-Ansicht:</span>
+              <kbd className="rounded border border-border px-1.5 py-0.5 font-mono text-foreground">Alt+</kbd>
+              <input
+                type="text"
+                maxLength={1}
+                value={d.diffHotkey}
+                onChange={(e) => e.target.value && d.setDiffHotkey(e.target.value)}
+                className="h-6 w-8 rounded border border-border bg-background text-center text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-theme-accent"
+                title="Taste für Diff-Ansicht"
+              />
+            </div>
+
+            {/* Add custom command form */}
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+                  Gesprochenes Wort
+                </label>
+                <input
+                  type="text"
+                  value={newVcSpoken}
+                  onChange={(e) => setNewVcSpoken(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleAddVoiceCommand()}
+                  placeholder="z.B. absatz"
+                  className="h-8 w-40 rounded-md border border-border bg-background px-3 text-sm text-foreground placeholder:text-text-dim/50 focus:outline-none focus:ring-1 focus:ring-theme-accent"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+                  Ersetzung
+                </label>
+                <select
+                  value={newVcReplacement}
+                  onChange={(e) => setNewVcReplacement(e.target.value)}
+                  className="h-8 rounded-md border border-border bg-surface px-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-theme-accent"
+                >
+                  {VC_PRESET_REPLACEMENTS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+              {newVcReplacement === "__custom__" && (
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+                    Eigener Text
+                  </label>
+                  <input
+                    type="text"
+                    value={newVcCustomText}
+                    onChange={(e) => setNewVcCustomText(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleAddVoiceCommand()}
+                    placeholder="Ersatztext"
+                    className="h-8 w-40 rounded-md border border-border bg-background px-3 text-sm text-foreground placeholder:text-text-dim/50 focus:outline-none focus:ring-1 focus:ring-theme-accent"
+                    autoFocus
+                  />
+                </div>
+              )}
+              <Button
+                size="sm"
+                disabled={!newVcSpoken.trim() || (newVcReplacement === "__custom__" && !newVcCustomText.trim())}
+                onClick={handleAddVoiceCommand}
+                className="shrink-0 bg-theme-accent text-background hover:bg-theme-accent/80 disabled:opacity-40"
+              >
+                Hinzufügen
+              </Button>
+            </div>
+          </div>
+        )}
 
         {/* Upload row */}
         <div className="space-y-2">
@@ -728,26 +1052,82 @@ export default function DictationPage() {
         <div className="grid grid-cols-2 gap-3">
           {(Object.keys(SOAP_LABELS) as SoapField[]).map((f) => {
             const lbl = SOAP_LABELS[f];
+            const isDirty = d.dirtyFields.has(f);
+            const hasLlm  = !!d.llmFields[f]?.trim();
             return (
               <Card key={f} className="relative overflow-visible border-border bg-surface">
-                <div className="absolute -top-2.5 left-3 bg-background/80 backdrop-blur-sm px-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-                  {lbl.short} · {lbl.label}
-                  {d.fields[f] && (
-                    <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-theme-accent align-middle" />
+                <div className="absolute -top-2.5 left-3 right-3 flex items-center bg-background/80 backdrop-blur-sm px-2">
+                  <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+                    {lbl.short} · {lbl.label}
+                    {d.fields[f] && (
+                      <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-theme-accent align-middle" />
+                    )}
+                  </span>
+                  {isDirty && (
+                    <button
+                      type="button"
+                      onClick={() => d.unlockField(f)}
+                      title="Feld für automatische Aktualisierung freigeben"
+                      className="ml-auto flex items-center gap-1 text-[10px] text-theme-accent/70 hover:text-theme-accent transition-colors"
+                    >
+                      <Lock className="h-2.5 w-2.5" />
+                      <span>gesperrt</span>
+                    </button>
                   )}
                 </div>
                 <CardContent className="p-3 pt-4">
-                  <Textarea
-                    value={d.fields[f]}
-                    onChange={(e) => d.setFieldText(f, e.target.value)}
-                    placeholder={`${lbl.label}…`}
-                    className="min-h-[100px] resize-y border-none bg-transparent text-sm leading-6 placeholder:text-text-dim/50 focus-visible:ring-0"
-                  />
+                  {/* Mode C — inline diff (only when dirty AND has LLM version) */}
+                  {d.diffMode && isDirty && hasLlm ? (
+                    <div className="min-h-[100px] max-h-[400px] overflow-y-auto whitespace-pre-wrap text-sm leading-6 py-1">
+                      {computeWordDiff(d.llmFields[f], d.fields[f]).map((seg, i) => (
+                        <span
+                          key={i}
+                          className={
+                            seg.type === "removed"
+                              ? "bg-danger/15 text-danger line-through decoration-danger/40"
+                              : seg.type === "added"
+                              ? "bg-success/15 text-success"
+                              : "text-foreground"
+                          }
+                        >
+                          {i > 0 ? " " : ""}{seg.text}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <Textarea
+                      value={d.fields[f]}
+                      onChange={(e) => d.setFieldText(f, e.target.value)}
+                      placeholder={`${lbl.label}…`}
+                      className="min-h-[100px] max-h-[400px] resize-y overflow-y-auto border-none bg-transparent text-sm leading-6 placeholder:text-text-dim/50 focus-visible:ring-0"
+                    />
+                  )}
+                  {/* Mode B — collapsed LLM suggestion (default, when dirty and not in diff mode) */}
+                  {!d.diffMode && isDirty && hasLlm && (
+                    <details className="mt-2 border-t border-border pt-2">
+                      <summary className="cursor-pointer text-[10px] uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors">
+                        KI-Vorschlag anzeigen
+                      </summary>
+                      <p className="mt-1.5 whitespace-pre-wrap text-sm text-muted-foreground/70 leading-6">
+                        {d.llmFields[f]}
+                      </p>
+                    </details>
+                  )}
                 </CardContent>
               </Card>
             );
           })}
         </div>
+
+        {/* Diff mode status + hotkey hint */}
+        {d.dirtyFields.size > 0 && (
+          <p className="text-[10px] text-muted-foreground">
+            {d.diffMode ? "Diff-Ansicht aktiv" : "Bearbeitete Felder gesperrt — KI aktualisiert nur offene Felder"}
+            {" · "}
+            <kbd className="rounded border border-border px-1 py-0.5 font-mono">Alt+{d.diffHotkey}</kbd>
+            {" "}{d.diffMode ? "zum Bearbeiten" : "zum Vergleichen"}
+          </p>
+        )}
 
         {/* ─── SECTION 3: Save as Gold Standard ─────────────────────── */}
 

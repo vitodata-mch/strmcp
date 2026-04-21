@@ -260,6 +260,135 @@ body {
   );
 }
 
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* VITODATA — Molten Amber: near-black + #F5A623 gold / burnt orange / crimson */
+/* ─────────────────────────────────────────────────────────────────────────── */
+[data-theme="vitodata"] {
+  /* layout */
+  --background:             #090501;
+  --foreground:             #fff8ed;
+  --surface:                rgba(255, 255, 255, 0.045);
+  --surface-2:              rgba(255, 255, 255, 0.075);
+  --border:                 rgba(255, 195, 90, 0.16);
+  --input:                  rgba(255, 255, 255, 0.07);
+  --text-dim:               #fb923c;
+  --radius:                 0.625rem;
+
+  /* accent */
+  --theme-accent:           #F5A623;
+  --accent-glow:            rgba(245, 166, 35, 0.30);
+  --ring:                   #F5A623;
+
+  /* semantic */
+  --provisional:            #fde68a;
+  --danger:                 #f87171;
+  --success:                #6ee7b7;
+
+  /* shadcn tokens */
+  --card:                   rgba(255, 255, 255, 0.035);
+  --card-foreground:        #fff8ed;
+  --popover:                rgba(12, 8, 1, 0.94);
+  --popover-foreground:     #fff8ed;
+  --primary:                #F5A623;
+  --primary-foreground:     #090501;
+  --secondary:              rgba(255, 255, 255, 0.07);
+  --secondary-foreground:   #fff8ed;
+  --muted:                  rgba(255, 255, 255, 0.05);
+  --muted-foreground:       #fb923c;
+  --accent-ui:              rgba(255, 255, 255, 0.07);
+  --accent-ui-foreground:   #fff8ed;
+  --destructive:            #f87171;
+  --destructive-foreground: #fafafa;
+}
+
+/* Molten amber glow — warm amber bottom-left · burnt orange top-right ·
+   golden shimmer top-center · deep amber bottom-right · apricot center  */
+[data-theme="vitodata"] body {
+  background-image:
+    radial-gradient(ellipse 115% 70% at  -8% 100%, rgba(245, 166,  35, 0.30) 0%, transparent 52%),
+    radial-gradient(ellipse  80% 58% at 108%   0%, rgba(234,  88,  12, 0.22) 0%, transparent 52%),
+    radial-gradient(ellipse  65% 45% at  52% -10%, rgba(251, 191,  36, 0.16) 0%, transparent 55%),
+    radial-gradient(ellipse  50% 38% at  82%  90%, rgba(217, 119,   6, 0.14) 0%, transparent 50%),
+    radial-gradient(ellipse  40% 30% at  20%  20%, rgba(253, 186, 116, 0.07) 0%, transparent 48%);
+}
+
+[data-theme="vitodata"] [data-slot="card"] {
+  background-image: linear-gradient(
+    145deg,
+    rgba(245, 166,  35, 0.08) 0%,
+    rgba(234,  88,  12, 0.04) 55%,
+    rgba(251, 191,  36, 0.03) 100%
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* LIQUID — iOS 26 Liquid Glass: iridescent pink/blue/violet frosted shimmer   */
+/* ─────────────────────────────────────────────────────────────────────────── */
+[data-theme="liquid"] {
+  /* layout */
+  --background:             #0a0612;
+  --foreground:             #f5ecff;
+  --surface:                rgba(255, 255, 255, 0.07);
+  --surface-2:              rgba(255, 255, 255, 0.11);
+  --border:                 rgba(230, 210, 255, 0.18);
+  --input:                  rgba(255, 255, 255, 0.09);
+  --text-dim:               #c4b5fd;
+  --radius:                 0.875rem;
+
+  /* accent */
+  --theme-accent:           #e0c3fc;
+  --accent-glow:            rgba(224, 195, 252, 0.32);
+  --ring:                   #e0c3fc;
+
+  /* semantic */
+  --provisional:            #fde68a;
+  --danger:                 #fb7185;
+  --success:                #6ee7b7;
+
+  /* shadcn tokens */
+  --card:                   rgba(255, 255, 255, 0.055);
+  --card-foreground:        #f5ecff;
+  --popover:                rgba(14, 8, 26, 0.88);
+  --popover-foreground:     #f5ecff;
+  --primary:                #e0c3fc;
+  --primary-foreground:     #0a0612;
+  --secondary:              rgba(255, 255, 255, 0.09);
+  --secondary-foreground:   #f5ecff;
+  --muted:                  rgba(255, 255, 255, 0.06);
+  --muted-foreground:       #c4b5fd;
+  --accent-ui:              rgba(255, 255, 255, 0.09);
+  --accent-ui-foreground:   #f5ecff;
+  --destructive:            #fb7185;
+  --destructive-foreground: #fafafa;
+}
+
+/* Iridescent liquid glow — pink bottom-left · cyan top-right · violet center ·
+   peach top-left · magenta bottom-right — soft, airy, shifting             */
+[data-theme="liquid"] body {
+  background-image:
+    radial-gradient(ellipse 120% 75% at  -5%  95%, rgba(244, 114, 182, 0.28) 0%, transparent 55%),
+    radial-gradient(ellipse  90% 60% at 108%   0%, rgba(125, 211, 252, 0.24) 0%, transparent 55%),
+    radial-gradient(ellipse  75% 55% at  50%  50%, rgba(167, 139, 250, 0.18) 0%, transparent 60%),
+    radial-gradient(ellipse  55% 40% at  15%  -5%, rgba(253, 186, 116, 0.12) 0%, transparent 52%),
+    radial-gradient(ellipse  50% 38% at 100% 100%, rgba(217,  70, 239, 0.16) 0%, transparent 50%);
+}
+
+[data-theme="liquid"] [data-slot="card"] {
+  background-image: linear-gradient(
+    145deg,
+    rgba(244, 114, 182, 0.10) 0%,
+    rgba(167, 139, 250, 0.06) 45%,
+    rgba(125, 211, 252, 0.08) 100%
+  );
+  backdrop-filter: blur(40px) saturate(2.2) brightness(1.12);
+  -webkit-backdrop-filter: blur(40px) saturate(2.2) brightness(1.12);
+  box-shadow:
+    0 8px 32px rgba(10, 6, 18, 0.45),
+    0 1px 0 rgba(255, 255, 255, 0.14) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.18) inset,
+    0 0 80px rgba(224, 195, 252, 0.06) inset;
+}
+
 /* ─── Animations ─────────────────────────────────────────────────────────── */
 @keyframes pulse-ring {
   0%, 100% { box-shadow: 0 0 0 4px rgba(248,  113, 113, 0.14); }

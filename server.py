@@ -7,7 +7,7 @@ Architecture:
   Browser (mic PCM chunks) → Socket.IO → Audio Buffer → VAD → Sliding Window → Whisper API → Diff Engine → Client
 
 Runs alongside existing Whisper container on p2aisv01.
-Whisper API expected at: http://localhost:8001/v1/audio/transcriptions
+Whisper API expected at: http://172.17.16.150:8000/v1/audio/transcriptions
 
 Usage:
   pip install fastapi uvicorn python-socketio aiohttp numpy torch torchaudio --break-system-packages
@@ -23,9 +23,9 @@ import json
 import logging
 import os
 import re
-import struct
 import time
 import unicodedata
+import uuid
 import wave
 from collections import deque
 from dataclasses import dataclass, field
@@ -95,11 +95,20 @@ wurden aus demselben Audiomaterial erzeugt — Unterschiede dort sind ASR-Fehler
 DEINE AUFGABE:
 Gib eine korrigierte Version von AKTUELLES_FENSTER zurück, indem du:
 
-1. KONTEXT verwendest, um das medizinische Thema zu verstehen (Diagnosen, Medikamente, Anamnese)
-2. Den Überlappungsbereich analysierst: Wörter die in VORHERIGES_FENSTER und AKTUELLES_FENSTER
-   unterschiedlich sind, obwohl sie dieselbe Audiostelle darstellen → wähle die semantisch korrektere Version
-3. Phonetische ASR-Fehler korrigierst (z.B. "Tafalgan"→"Dafalgan", "Gesinsaal"→"Xyzal",
-   "Nofalgin"→"Novalgin", "atihstamn"→"Antihistamin", etc.)
+1. KONTEXT verwendest, um das medizinische Thema zu verstehen
+2. Den Überlappungsbereich analysierst
+3. Phonetische ASR-Fehler korrigierst — auch wenn die Ähnlichkeit 
+    nicht offensichtlich ist. Nutze den medizinischen Kontext 
+    (Diagnose, Symptome, Fachgebiet), um zu erkennen welches 
+    Medikament/welcher Fachbegriff tatsächlich gesprochen wurde.
+    Beispiele:
+    - "ein Gobi" / "Weg Ovi" → "Wegovy" (GLP-1-Agonist, Kontext: Adipositas/Diabetes)
+    - "Tafalgan" → "Dafalgan" (Paracetamol, phonetisch ähnlich)
+    - "Gesinsaal" / "sexy Sal" → "Xyzal" (Antihistamin, phonetisch verzerrt)
+    - "Nofalgin" → "Novalgin" (Metamizol)
+    - "Panto Pro Soll" → "Pantoprazol" (Protonenpumpenhemmer)
+    - "Oh Mepra Soll" → "Omeprazol" (Protonenpumpenhemmer)
+    - "atihstamn" → "Antihistamin"
 4. Schweizer Orthographie verwendest (ss statt ß, z.B. "heisst", "muss", "strasse")
 5. Den Telegrammstil beibehältst — keine Umformulierung in vollständige Sätze
 6. Fehlende Satzzeichen ergänzt wo klar erkennbar
@@ -135,13 +144,37 @@ STRIKTE GRENZEN (MDR-Compliance):
 
 Gib NUR den korrigierten Text zurück. Keine Erklärungen, keine Kommentare."""
 
+# Overlap-aware per-window correction with correction diffs.
+# Replaces LLM_WINDOW_CORRECTION_PROMPT for the normal single-model mode.
+CORRECTION_PROMPT_V2 = """Du bist ein medizinischer ASR-Korrektor für Schweizer Arztdiktate.
+
+## AUFGABE
+Du erhältst bereits bestätigten Text (COMMITTED TEXT) und das aktuelle Whisper-Fenster.
+Gib NUR den Text zurück, der im aktuellen Fenster NEU ist — alles, was noch nicht im COMMITTED TEXT steht.
+
+Regeln:
+- Beginne direkt nach dem letzten Wort des committed text
+- Wiederhole NICHTS aus dem committed text — auch nicht paraphrasiert
+- Korrigiere ASR-Fehler bei Medikamenten und Fachbegriffen
+- Schweizer Orthographie (ss statt ß)
+- Telegrammstil beibehalten
+
+Optional — Korrekturen:
+Wenn ein Wort im committed text offensichtlich falsch transkribiert wurde, gib max. 2 Korrekturen an.
+Nur bei hoher Sicherheit. Niemals Diagnosen, Dosierungen oder Markennamen ändern.
+
+## AUSGABEFORMAT (JSON, immer)
+{"new": "nur der neue text hier", "corrections": []}
+corrections darf leer bleiben: []"""
+
 SAMPLE_RATE = 16000          # 16 kHz
 CHANNELS = 1                 # mono
 SAMPLE_WIDTH = 2             # 16-bit = 2 bytes per sample
 
 # Sliding window parameters
 WINDOW_SIZE_S = 12           # seconds of audio to send to Whisper each time
-STEP_INTERVAL_S = 1.5        # how often to run Whisper (in seconds of new audio)
+STEP_INTERVAL_S = 2.0        # how often to run Whisper (in seconds of new audio) — provisional updates
+LLM_STEP_INTERVAL_S = 10.0   # how often to run LLM correction (in seconds of new audio) — committed text
 MIN_AUDIO_S = 0.5            # minimum audio before first transcription
 
 # VAD parameters
@@ -150,6 +183,100 @@ SILENCE_TIMEOUT_S = 3.0      # seconds of silence before finalizing segment
 
 # Diff / self-correction
 STABLE_WORD_COUNT = 3        # words from the end that are considered "provisional"
+
+# ---------------------------------------------------------------------------
+# Voice Commands — spoken words replaced with punctuation/formatting
+# ---------------------------------------------------------------------------
+
+VOICE_COMMANDS: dict[str, str] = {
+    "punkt":          ".",
+    "komma":          ",",
+    "doppelpunkt":    ":",
+    "semikolon":      ";",
+    "fragezeichen":   "?",
+    "ausrufezeichen": "!",
+    "neue zeile":     "\n",
+    "neuer absatz":   "\n\n",
+    "bindestrich":    "-",
+    "schrägstrich":   "/",
+    "klammer auf":    "(",
+    "klammer zu":     ")",
+}
+
+
+def _build_vc_pattern(commands: dict[str, str]) -> re.Pattern:
+    return re.compile(
+        r"\b(" + "|".join(
+            re.escape(cmd) for cmd in sorted(commands.keys(), key=len, reverse=True)
+        ) + r")\b",
+        re.IGNORECASE,
+    )
+
+
+_vc_pattern = _build_vc_pattern(VOICE_COMMANDS)
+
+
+def apply_voice_commands(text: str, extra: dict[str, str] | None = None) -> str:
+    """Replace spoken voice commands with their punctuation equivalents.
+
+    extra: per-session custom commands (merged with built-ins, custom takes priority).
+    """
+    if extra:
+        commands = {**VOICE_COMMANDS, **extra}
+        pattern = _build_vc_pattern(commands)
+    else:
+        commands = VOICE_COMMANDS
+        pattern = _vc_pattern
+
+    def _replace(m: re.Match) -> str:
+        return commands.get(m.group(1).lower(), m.group(0))
+
+    result = pattern.sub(_replace, text)
+    result = re.sub(r"\s+([.,;:?!)])", r"\1", result)
+    result = re.sub(r"\(\s+", "(", result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Action Commands — spoken phrases that trigger server-side actions
+# (stripped from transcript, never reach the LLM)
+# ---------------------------------------------------------------------------
+
+ACTION_COMMANDS: dict[str, str] = {
+    "mach einen bericht":    "soap",
+    "erstelle bericht":      "soap",
+    "bericht erstellen":     "soap",
+    "generiere bericht":     "soap",
+    "soap erstellen":        "soap",
+    "soap note erstellen":   "soap",
+    "zeige soap":            "soap",
+}
+
+_ac_pattern = re.compile(
+    r"\b(" + "|".join(
+        re.escape(cmd) for cmd in sorted(ACTION_COMMANDS.keys(), key=len, reverse=True)
+    ) + r")\b",
+    re.IGNORECASE,
+)
+
+ACTION_COOLDOWN_S = 10.0  # Minimum seconds between the same action firing again
+
+
+def extract_action_commands(text: str) -> tuple[str, list[str]]:
+    """Detect and remove action phrases from text.
+
+    Returns (clean_text, list_of_triggered_action_names).
+    The phrase is stripped so it never appears in the transcript.
+    """
+    actions: list[str] = []
+
+    def _replace(m: re.Match) -> str:
+        actions.append(ACTION_COMMANDS[m.group(1).lower()])
+        return ""
+
+    clean = _ac_pattern.sub(_replace, text)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean, actions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("dictation")
@@ -223,9 +350,27 @@ class AudioSession:
     whisper_only: bool = False
     live_soap: bool = False
 
+    # Custom per-session voice commands (spoken_lower → replacement)
+    custom_voice_commands: dict = field(default_factory=dict)
+    # Cooldown tracking for action commands (action_name → last_fired monotonic time)
+    _last_action_time: dict = field(default_factory=dict)
+
+    # SOAP refinement — stores current field content + dirty set for LLM context
+    soap_fields: dict = field(default_factory=lambda: {
+        "subjective": "", "objective": "", "assessment": "", "plan": "",
+    })
+    dirty_fields: set = field(default_factory=set)
+    _soap_unlock_pending: bool = False
+
+    # Transcript deduplication — sliding window state
+    prev_raw_text: str = ""          # raw Whisper output of previous window
+    prev_words: list = field(default_factory=list)  # word timestamps of previous window
+    pending_corrections: list = field(default_factory=list)  # unapplied LLM correction diffs
+
     # Timing
     last_whisper_call: float = 0.0
     samples_at_last_call: int = 0
+    samples_at_last_llm_call: int = 0
     last_speech_time: float = 0.0
     is_active: bool = False
 
@@ -273,6 +418,10 @@ class AudioSession:
     def new_audio_since_last_call_s(self) -> float:
         return (self.total_samples - self.samples_at_last_call) / SAMPLE_RATE
 
+    @property
+    def new_audio_since_last_llm_call_s(self) -> float:
+        return (self.total_samples - self.samples_at_last_llm_call) / SAMPLE_RATE
+
     def clear(self):
         """Reset the session."""
         self.chunks.clear()
@@ -290,39 +439,31 @@ class AudioSession:
         # Note: compare_mode is NOT reset — it persists across sessions
         self.last_whisper_call = 0.0
         self.samples_at_last_call = 0
+        self.samples_at_last_llm_call = 0
         self.last_speech_time = 0.0
         self.is_active = False
         self.silence_start = None
+        self.prev_raw_text = ""
+        self.prev_words = []
+        self.pending_corrections = []
 
 
 # ---------------------------------------------------------------------------
 # Diff Engine — self-correction logic
 # ---------------------------------------------------------------------------
 
-def compute_stable_text(previous: str, current: str, stable_tail: int = STABLE_WORD_COUNT) -> tuple[str, str]:
+def compute_stable_text(current: str, stable_tail: int = STABLE_WORD_COUNT) -> tuple[str, str]:
     """
-    Compare previous and current transcriptions.
-    Returns (confirmed_text, provisional_text).
+    Split a Whisper transcription into confirmed and provisional parts.
 
-    The idea: words that remain the same between consecutive Whisper outputs
-    are "confirmed". Words at the tail that might still change are "provisional".
+    The last `stable_tail` words are provisional — they may still change in the
+    next overlapping window.  Everything before them is considered confirmed.
     """
     if not current.strip():
         return "", ""
 
-    prev_words = previous.split()
     curr_words = current.split()
 
-    if not prev_words:
-        # First transcription — everything is provisional
-        if len(curr_words) <= stable_tail:
-            return "", current
-        confirmed = " ".join(curr_words[:-stable_tail])
-        provisional = " ".join(curr_words[-stable_tail:])
-        return confirmed, provisional
-
-    # Words that matched from the start are more stable
-    # But the last few words might still change
     if len(curr_words) <= stable_tail:
         return "", current
 
@@ -332,12 +473,32 @@ def compute_stable_text(previous: str, current: str, stable_tail: int = STABLE_W
     return confirmed, provisional
 
 
+def _word_fuzzy_eq(a: str, b: str) -> bool:
+    """Fuzzy word equality for overlap detection.
+
+    Handles case differences, trailing punctuation, and number prefixes
+    (e.g. '7150' matches '7150696' because Whisper may truncate numbers
+    depending on the audio window boundary).
+    """
+    if a == b:
+        return True
+    a_c = a.rstrip(".,;:!?").lower()
+    b_c = b.rstrip(".,;:!?").lower()
+    if a_c == b_c:
+        return True
+    # Number prefix tolerance: "7150" ≈ "7150696"
+    if a_c.isdigit() and b_c.isdigit():
+        return a_c.startswith(b_c) or b_c.startswith(a_c)
+    return False
+
+
 def _accumulate_full_text(session: AudioSession, confirmed: str) -> None:
     """Accumulate confirmed text into session.full_text as the window slides.
 
-    Detects new words at the start of the confirmed text that weren't in the
-    previous window's confirmed text — those are words that have slid out of
-    the window and are now permanent.
+    Compares the new confirmed text against the previous window's confirmed text
+    to detect new words that have slid out of the window — those become permanent.
+    Uses fuzzy word matching to tolerate Whisper inconsistencies (case, punctuation,
+    number truncation).
     """
     if not confirmed:
         return
@@ -346,16 +507,14 @@ def _accumulate_full_text(session: AudioSession, confirmed: str) -> None:
         # First window — full_text IS the confirmed text
         session.full_text = confirmed
     else:
-        # Find how much of the old confirmed text is still present at the start
-        # of the new confirmed text.  Whatever is in the new confirmed but
-        # wasn't before is appended.
         prev_words = session._prev_confirmed.split()
         curr_words = confirmed.split()
 
-        # Find overlap: the longest suffix of prev that matches a prefix of curr
+        # Find overlap: longest suffix of prev that matches a prefix of curr
+        max_check = min(len(prev_words), len(curr_words), 40)
         overlap = 0
-        for k in range(min(len(prev_words), len(curr_words)), 0, -1):
-            if prev_words[-k:] == curr_words[:k]:
+        for k in range(max_check, 0, -1):
+            if all(_word_fuzzy_eq(a, b) for a, b in zip(prev_words[-k:], curr_words[:k])):
                 overlap = k
                 break
 
@@ -371,11 +530,29 @@ def _accumulate_full_text(session: AudioSession, confirmed: str) -> None:
             else:
                 session.full_text = " ".join(new_words)
 
+        # Dedup: catch repeated phrase runs that slipped through overlap detection.
+        # Scans for the longest repeated suffix (3-15 words) and removes the duplicate.
+        ft_words = session.full_text.split()
+        if len(ft_words) >= 6:
+            max_phrase = min(15, len(ft_words) // 2)
+            for plen in range(max_phrase, 2, -1):
+                tail = ft_words[-plen:]
+                # Check if the same phrase appears right before the tail
+                preceding = ft_words[-(2 * plen):-plen]
+                if len(preceding) == plen and all(
+                    _word_fuzzy_eq(a, b) for a, b in zip(preceding, tail)
+                ):
+                    session.full_text = " ".join(ft_words[:-plen])
+                    log.debug("Dedup removed %d repeated words from full_text", plen)
+                    break
+
     session._prev_confirmed = confirmed
 
 
 # Minimum new text (chars) before triggering a live SOAP update
-_LIVE_SOAP_MIN_CHARS = 500
+_LIVE_SOAP_MIN_CHARS = 100
+# Lower threshold used after a field is unlocked — fills it in sooner
+_LIVE_SOAP_UNLOCK_CHARS = 80
 
 
 async def _maybe_live_soap(sid: str, session: AudioSession) -> None:
@@ -383,31 +560,40 @@ async def _maybe_live_soap(sid: str, session: AudioSession) -> None:
     if not session.live_soap:
         return
     text = session.full_text
+    threshold = _LIVE_SOAP_UNLOCK_CHARS if session._soap_unlock_pending else _LIVE_SOAP_MIN_CHARS
     new_chars = len(text) - session._soap_text_len if text else 0
-    if not text or new_chars < _LIVE_SOAP_MIN_CHARS:
+    if not text or new_chars < threshold:
         return
 
-    log.info("Live SOAP triggered: %d new chars (total %d)", new_chars, len(text))
+    log.info("Live SOAP triggered: %d new chars (threshold=%d, total=%d)", new_chars, threshold, len(text))
     session._soap_text_len = len(text)
 
     # Fire-and-forget: generate SOAP in background so it doesn't block the loop
-    asyncio.create_task(_emit_live_soap(sid, text))
+    asyncio.create_task(_emit_live_soap(sid, session))
 
 
-async def _emit_live_soap(sid: str, text: str) -> None:
-    """Generate SOAP and emit as a live update event."""
+async def _emit_live_soap(sid: str, session: AudioSession) -> None:
+    """Generate SOAP with refinement context and emit as a live update event."""
+    session._soap_unlock_pending = False   # reset after firing regardless of outcome
     try:
         await sio.emit("soap_generating", {}, room=sid)
-        log.info("Live SOAP: calling LLM with %d chars of text", len(text))
+        log.info("Live SOAP: calling LLM with %d chars, dirty=%s", len(session.full_text), session.dirty_fields)
         t0 = time.perf_counter()
-        soap = await _generate_soap_llm(text)
+        soap = await _generate_soap_llm_with_context(
+            session.full_text, session.soap_fields, session.dirty_fields,
+        )
         duration_ms = round((time.perf_counter() - t0) * 1000)
         if soap:
-            log.info("Live SOAP emitted in %d ms, keys: %s", duration_ms, list(soap.keys()))
+            # Store the LLM output in the session for clean fields
+            for field in ("subjective", "objective", "assessment", "plan"):
+                if field not in session.dirty_fields:
+                    session.soap_fields[field] = soap.get(field, "")
+            log.info("Live SOAP emitted in %d ms", duration_ms)
             soap["duration_ms"] = duration_ms
+            soap["dirty_protected"] = list(session.dirty_fields)
             await sio.emit("soap_update", soap, room=sid)
         else:
-            log.warning("Live SOAP: _generate_soap_llm returned None after %d ms", duration_ms)
+            log.warning("Live SOAP: LLM returned None after %d ms", duration_ms)
     except Exception as e:
         log.warning("Live SOAP generation failed: %s", e, exc_info=True)
 
@@ -416,8 +602,13 @@ async def _emit_live_soap(sid: str, text: str) -> None:
 # Whisper Client
 # ---------------------------------------------------------------------------
 
-async def call_whisper(audio: np.ndarray, session: aiohttp.ClientSession) -> str:
-    """Send audio to the Whisper API and return the transcription."""
+async def call_whisper(audio: np.ndarray, session: aiohttp.ClientSession) -> tuple[str, list]:
+    """Send audio to the Whisper API and return (text, []).
+
+    Word timestamps are not requested — the GPUStack Whisper endpoint does not
+    support verbose_json.  The second element is always an empty list so that
+    callers can unpack uniformly as `text, words = await call_whisper(...)`.
+    """
     # Convert float32 numpy array to WAV bytes
     wav_buffer = io.BytesIO()
     audio_int16 = (audio * 32768).clip(-32768, 32767).astype(np.int16)
@@ -428,7 +619,6 @@ async def call_whisper(audio: np.ndarray, session: aiohttp.ClientSession) -> str
         wf.writeframes(audio_int16.tobytes())
     wav_buffer.seek(0)
 
-    # Send to Whisper API as multipart form
     form = aiohttp.FormData()
     form.add_field("file", wav_buffer, filename="audio.wav", content_type="audio/wav")
     form.add_field("model", WHISPER_MODEL)
@@ -441,20 +631,23 @@ async def call_whisper(audio: np.ndarray, session: aiohttp.ClientSession) -> str
 
     try:
         t0 = time.monotonic()
-        async with session.post(WHISPER_API_URL, data=form, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+        async with session.post(
+            WHISPER_API_URL, data=form, headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
             elapsed = time.monotonic() - t0
             if resp.status == 200:
                 result = await resp.json()
                 text = result.get("text", "").strip()
                 log.info("Whisper responded in %.2fs: '%s'", elapsed, text[:80])
-                return text
+                return text, []
             else:
                 body = await resp.text()
                 log.error("Whisper API error %d: %s", resp.status, body[:200])
-                return ""
+                return "", []
     except Exception as e:
         log.error("Whisper API call failed: %s", e)
-        return ""
+        return "", []
 
 
 # ---------------------------------------------------------------------------
@@ -507,15 +700,55 @@ async def _call_llm(system_prompt: str, user_content: str,
         return None
 
 
-async def correct_window_with_llm(
+def _extract_json(raw: str) -> dict | None:
+    """Robustly extract a JSON object from an LLM response string.
+
+    Handles common LLM output patterns:
+      - plain JSON: {"new": "...", "corrections": [...]}
+      - markdown fences: ```json\n{...}\n```
+      - "json " prefix: json {"new": ...}
+      - prose before JSON: "Here is the output:\n{...}"
+    """
+    text = raw.strip()
+
+    # Strip markdown code fences
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
+
+    # Strip leading "json" word (e.g. "json {" or "JSON\n{")
+    text = re.sub(r"^json\s*", "", text, flags=re.IGNORECASE)
+
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Find the first {...} block using regex (handles prose before/after JSON)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+async def _correct_window_simple(
     confirmed_so_far: str,
     previous_window: str,
     current_window: str,
     http_session: aiohttp.ClientSession,
     model: str = "",
 ) -> str:
-    """Per-window correction: resolves conflicts in the overlapping region between
-    two consecutive Whisper windows using semantic/medical context."""
+    """Simple per-window correction (used in compare mode).
+
+    Resolves conflicts in the overlapping region between two consecutive
+    Whisper windows using semantic/medical context. Returns corrected string.
+    """
     if not LLM_CORRECTION_ENABLED or not current_window.strip():
         return current_window
 
@@ -535,6 +768,60 @@ async def correct_window_with_llm(
     return result or current_window
 
 
+async def correct_window_with_llm(
+    full_text: str,
+    prev_raw_text: str,
+    overlap_prev: str,
+    overlap_curr: str,
+    new_slice: str,
+    curr_raw_text: str,
+    http_session: aiohttp.ClientSession,
+    model: str = "",
+) -> dict:
+    """Overlap-aware per-window correction. Returns {"new": str, "corrections": list}.
+
+    Sends the committed text, both overlapping window transcriptions, and the new
+    2s slice to the LLM.  The LLM outputs only the genuinely new content plus
+    optional correction diffs for words that differed between the two windows.
+    """
+    if not LLM_CORRECTION_ENABLED or not curr_raw_text.strip():
+        return {"new": curr_raw_text, "corrections": []}
+
+    user_content = (
+        f"## COMMITTED TEXT (bereits bestätigt — nicht wiederholen)\n"
+        f"{full_text or '(noch kein Text)'}\n\n"
+        f"## VORHERIGES WHISPER-FENSTER (Referenz)\n"
+        f"{prev_raw_text or '(erstes Fenster)'}\n\n"
+        f"## AKTUELLES WHISPER-FENSTER\n"
+        f"{curr_raw_text}"
+    )
+
+    raw = await _call_llm(
+        CORRECTION_PROMPT_V2, user_content, http_session,
+        timeout=12.0, label="LLM-window-v2",
+        model=model,
+    )
+    if not raw:
+        return {"new": curr_raw_text, "corrections": []}
+
+    parsed = _extract_json(raw)
+    if parsed and isinstance(parsed, dict):
+        return {
+            "new": str(parsed.get("new", new_slice or "")),
+            "corrections": parsed.get("corrections", []) if isinstance(parsed.get("corrections"), list) else [],
+        }
+
+    # Could not parse JSON — use raw output as new text only if it looks like prose
+    # (not JSON garbage).  If it still contains '{', discard it to avoid polluting
+    # the transcript with raw JSON.
+    if "{" in raw:
+        log.warning("LLM-window-v2 non-parseable JSON — discarding to avoid pollution: %r", raw[:120])
+        return {"new": curr_raw_text, "corrections": []}
+
+    log.warning("LLM-window-v2 returned plain text (no JSON): %r", raw[:120])
+    return {"new": raw.strip(), "corrections": []}
+
+
 async def correct_final_with_llm(text: str, http_session: aiohttp.ClientSession,
                                  model: str = "") -> str:
     """Final correction pass on the complete accumulated dictation text."""
@@ -549,6 +836,35 @@ async def correct_final_with_llm(text: str, http_session: aiohttp.ClientSession,
     if result:
         log.info("Final corrected [%s]: '%s' → '%s'", model or LLM_MODEL, text[:60], result[:60])
     return result or text
+
+
+def apply_corrections(
+    full_text: str,
+    corrections: list[dict],
+) -> tuple[str, list[dict]]:
+    """Apply LLM correction diffs to full_text.
+
+    Returns (updated_full_text, applied_corrections_with_offsets).
+    Replaces only the last occurrence of each 'from' string (most recently spoken = most likely wrong).
+    Caps at 2 corrections per call.  Skips corrections where 'from' is not found.
+    """
+    applied: list[dict] = []
+    for c in corrections[:2]:
+        original = c.get("from", "").strip()
+        corrected = c.get("to", "").strip()
+        if not original or not corrected or original.lower() == corrected.lower():
+            continue
+        idx = full_text.lower().rfind(original.lower())
+        if idx == -1:
+            continue
+        full_text = full_text[:idx] + corrected + full_text[idx + len(original):]
+        applied.append({
+            "id": str(uuid.uuid4())[:8],
+            "original": original,
+            "corrected": corrected,
+            "offset": idx,
+        })
+    return full_text, applied
 
 
 async def _emit_final_transcription(sid: str, raw_text: str, session: AudioSession) -> None:
@@ -762,7 +1078,9 @@ async def stop_dictation(sid, data=None):
     # Final transcription of all accumulated audio
     if session and session.total_samples > 0 and http_session:
         audio = session.get_all_audio()
-        text = await call_whisper(audio, http_session)
+        text, _ = await call_whisper(audio, http_session)
+        text = apply_voice_commands(text, session.custom_voice_commands or None)
+        text, _ = extract_action_commands(text)
         if text:
             await _emit_final_transcription(sid, text, session)
 
@@ -813,9 +1131,6 @@ async def transcription_loop(sid: str):
         while session.is_active:
             await asyncio.sleep(0.3)  # Check every 300ms
 
-            if not session.is_active:
-                break
-
             # Check if we have enough new audio to warrant a Whisper call
             if session.duration_s < MIN_AUDIO_S:
                 continue
@@ -832,16 +1147,26 @@ async def transcription_loop(sid: str):
             session.samples_at_last_call = session.total_samples
 
             # Call Whisper
-            raw_text = await call_whisper(audio_window, http_session)
+            raw_text, _ = await call_whisper(audio_window, http_session)
+            raw_text = apply_voice_commands(raw_text, session.custom_voice_commands or None)
+            raw_text, raw_actions = extract_action_commands(raw_text)
+
+            # Fire action commands (with cooldown to avoid sliding-window re-fires)
+            _now = time.monotonic()
+            for _action in raw_actions:
+                if _now - session._last_action_time.get(_action, 0) > ACTION_COOLDOWN_S:
+                    session._last_action_time[_action] = _now
+                    if _action == "soap" and session.full_text:
+                        log.info("Action command 'soap' triggered for %s", sid)
+                        asyncio.create_task(_emit_live_soap(sid, session))
+
             if not raw_text:
                 continue
 
             if session.whisper_only:
                 # ── Whisper-only: skip LLM, use raw Whisper text ──
                 new_text = raw_text
-                confirmed, provisional = compute_stable_text(
-                    session.last_transcription, new_text, stable_tail=STABLE_WORD_COUNT,
-                )
+                confirmed, provisional = compute_stable_text(new_text)
                 session.last_transcription = new_text
                 session.confirmed_text = confirmed
                 session.provisional_text = provisional
@@ -865,29 +1190,25 @@ async def transcription_loop(sid: str):
             elif session.compare_mode:
                 # ── Comparison mode: run both models in parallel ──
                 new_text_a, new_text_b = await asyncio.gather(
-                    correct_window_with_llm(
+                    _correct_window_simple(
                         session.confirmed_text, session.last_transcription,
                         raw_text, http_session,
                     ),
-                    correct_window_with_llm(
+                    _correct_window_simple(
                         session.confirmed_text_b, session.last_transcription_b,
                         raw_text, http_session, model=LLM_MODEL_B,
                     ),
                 )
 
                 # Diff for Model A
-                confirmed_a, provisional_a = compute_stable_text(
-                    session.last_transcription, new_text_a, stable_tail=STABLE_WORD_COUNT,
-                )
+                confirmed_a, provisional_a = compute_stable_text(new_text_a)
                 session.last_transcription = new_text_a
                 session.confirmed_text = confirmed_a
                 session.provisional_text = provisional_a
                 _accumulate_full_text(session, confirmed_a)
 
                 # Diff for Model B
-                confirmed_b, provisional_b = compute_stable_text(
-                    session.last_transcription_b, new_text_b, stable_tail=STABLE_WORD_COUNT,
-                )
+                confirmed_b, provisional_b = compute_stable_text(new_text_b)
                 session.last_transcription_b = new_text_b
                 session.confirmed_text_b = confirmed_b
                 session.provisional_text_b = provisional_b
@@ -900,6 +1221,8 @@ async def transcription_loop(sid: str):
                     "is_final": False,
                     "raw_whisper": raw_text,
                 }, room=sid)
+
+                await _maybe_live_soap(sid, session)
 
                 # Emit comparison event with both
                 await sio.emit("transcription_compare", {
@@ -923,34 +1246,50 @@ async def transcription_loop(sid: str):
 
             else:
                 # ── Normal single-model mode ──
-                new_text = await correct_window_with_llm(
-                    session.confirmed_text,
-                    session.last_transcription,
-                    raw_text,
-                    http_session,
-                )
+                # Decoupled cadence:
+                #   • Whisper fires every STEP_INTERVAL_S (2s) — shows raw tail as provisional
+                #   • LLM fires every LLM_STEP_INTERVAL_S (10s) — commits clean corrected text
+                # With a 10s LLM step and 12s window the overlap is only ~2s (≈4-6 words),
+                # making exact word-level deduplication reliable.
 
-                # Compute confirmed vs provisional using diff
-                confirmed, provisional = compute_stable_text(
-                    session.last_transcription,
-                    new_text,
-                    stable_tail=STABLE_WORD_COUNT,
-                )
-                session.last_transcription = new_text
-                session.confirmed_text = confirmed
-                session.provisional_text = provisional
-                _accumulate_full_text(session, confirmed)
+                # Always update provisional from raw Whisper output
+                raw_confirmed, raw_provisional = compute_stable_text(raw_text)
+                session.provisional_text = raw_provisional
 
-                # Send to client
-                await sio.emit("transcription", {
-                    "confirmed": confirmed,
-                    "provisional": provisional,
-                    "full_text": session.full_text,
-                    "is_final": False,
-                    "raw_whisper": raw_text,
-                }, room=sid)
+                if session.new_audio_since_last_llm_call_s >= LLM_STEP_INTERVAL_S:
+                    # LLM correction cycle — commit clean text
+                    session.samples_at_last_llm_call = session.total_samples
 
-                # Trigger live SOAP if enough new text has accumulated
+                    new_text = await _correct_window_simple(
+                        session.confirmed_text, session.last_transcription,
+                        raw_text, http_session,
+                    )
+
+                    session.prev_raw_text = raw_text
+                    confirmed, provisional = compute_stable_text(new_text)
+                    session.last_transcription = new_text
+                    session.confirmed_text = confirmed
+                    session.provisional_text = provisional
+                    _accumulate_full_text(session, confirmed)
+
+                    await sio.emit("transcription", {
+                        "confirmed": confirmed,
+                        "provisional": provisional,
+                        "full_text": session.full_text,
+                        "is_final": False,
+                        "raw_whisper": raw_text,
+                    }, room=sid)
+                else:
+                    # Provisional-only update — raw Whisper tail shown in amber
+                    await sio.emit("transcription", {
+                        "confirmed": session.confirmed_text,
+                        "provisional": raw_provisional,
+                        "full_text": session.full_text,
+                        "is_final": False,
+                        "raw_whisper": raw_text,
+                    }, room=sid)
+
+                # Check live SOAP after every Whisper step (fires only when full_text crosses threshold)
                 await _maybe_live_soap(sid, session)
 
                 # Check for silence timeout → auto-finalize with full final correction
@@ -958,7 +1297,7 @@ async def transcription_loop(sid: str):
                     silence_duration = time.monotonic() - session.silence_start
                     if silence_duration > SILENCE_TIMEOUT_S:
                         log.info("Silence timeout, finalizing segment with LLM final correction")
-                        await _emit_final_transcription(sid, new_text, session)
+                        await _emit_final_transcription(sid, raw_text, session)
                         session.silence_start = None
 
     except asyncio.CancelledError:
@@ -1090,7 +1429,9 @@ async def transcribe_file_stream(sid, data):
         if task:
             task.cancel()
 
-        raw_text = await call_whisper(audio, http_session)
+        raw_text, _ = await call_whisper(audio, http_session)
+        raw_text = apply_voice_commands(raw_text, session.custom_voice_commands or None)
+        raw_text, _ = extract_action_commands(raw_text)
         if raw_text:
             await sio.emit("transcription", {
                 "confirmed": raw_text, "provisional": "", "is_final": True,
@@ -1182,21 +1523,108 @@ async def set_live_soap(sid, data=None):
         log.info("Live SOAP mode %s for %s", "ON" if session.live_soap else "OFF", sid)
 
 
+@sio.event
+async def update_soap_field(sid, data=None):
+    """Doctor edited a SOAP field — store content and mark dirty."""
+    session = sessions.get(sid)
+    if not session or not isinstance(data, dict):
+        return
+    field = data.get("field", "")
+    text  = data.get("text", "")
+    if field not in ("subjective", "objective", "assessment", "plan"):
+        return
+    session.soap_fields[field] = text
+    session.dirty_fields.add(field)
+
+
+@sio.event
+async def unlock_soap_field(sid, data=None):
+    """Doctor unlocked a field — remove dirty flag and lower next SOAP threshold."""
+    session = sessions.get(sid)
+    if not session or not isinstance(data, dict):
+        return
+    field = data.get("field", "")
+    if field not in ("subjective", "objective", "assessment", "plan"):
+        return
+    session.dirty_fields.discard(field)
+    session._soap_unlock_pending = True
+    log.info("Field '%s' unlocked for %s — next SOAP triggers at %d chars", field, sid, _LIVE_SOAP_UNLOCK_CHARS)
+
+
+@sio.event
+async def revert_correction(sid, data=None):
+    """Doctor reverted an LLM correction — restore the original ASR word."""
+    session = sessions.get(sid)
+    if not session or not isinstance(data, dict):
+        return
+    correction_id = data.get("id", "")
+    corr = next((c for c in session.pending_corrections if c["id"] == correction_id), None)
+    if not corr:
+        return
+    idx = corr["offset"]
+    end = idx + len(corr["corrected"])
+    # Only revert if the text at that offset still matches the corrected version
+    if session.full_text[idx:end] == corr["corrected"]:
+        session.full_text = session.full_text[:idx] + corr["original"] + session.full_text[end:]
+    session.pending_corrections = [c for c in session.pending_corrections if c["id"] != correction_id]
+    await sio.emit("transcript_corrected", {
+        "full_text": session.full_text,
+        "reverted_id": correction_id,
+    }, room=sid)
+
+
+@sio.event
+async def set_voice_commands(sid, data=None):
+    """Update custom voice commands for this session.
+
+    data: { commands: [{spoken: str, replacement: str}, ...] }
+    Replacement strings support \\n for newline and \\n\\n for paragraph break.
+    """
+    session = sessions.get(sid)
+    if not session or not isinstance(data, dict):
+        return
+    commands_list = data.get("commands", [])
+    if not isinstance(commands_list, list):
+        return
+    session.custom_voice_commands = {
+        item["spoken"].strip().lower(): item["replacement"].replace("\\n", "\n")
+        for item in commands_list
+        if isinstance(item, dict) and item.get("spoken") and "replacement" in item
+    }
+    log.info("Custom voice commands updated for %s: %d commands", sid, len(session.custom_voice_commands))
+
+
 # ---------------------------------------------------------------------------
 # WAV file upload endpoint (non-streaming, for comparison/testing)
 # ---------------------------------------------------------------------------
 
 @fastapi_app.post("/v1/transcribe")
 async def transcribe_file(file: UploadFile = File(...)):
-    """Upload a WAV file for batch transcription (non-streaming)."""
+    """Upload an audio file for batch transcription (non-streaming). Supports WAV, MP3, FLAC, OGG, M4A."""
     if not http_session:
         return {"error": "Server not ready"}
 
     content = await file.read()
-    wav_buffer = io.BytesIO(content)
+
+    # Decode and resample to 16kHz mono (handles all formats torchaudio supports)
+    try:
+        audio, orig_sr = load_audio_bytes(content)
+        audio = resample_to_16k(audio, orig_sr)
+    except Exception as e:
+        return {"error": f"Audiodatei konnte nicht geladen werden: {e}"}
+
+    # Re-encode as WAV for Whisper API
+    wav_buffer = io.BytesIO()
+    audio_int16 = (audio * 32768).clip(-32768, 32767).astype(np.int16)
+    with wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(SAMPLE_WIDTH)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(audio_int16.tobytes())
+    wav_buffer.seek(0)
 
     form = aiohttp.FormData()
-    form.add_field("file", wav_buffer, filename=file.filename, content_type="audio/wav")
+    form.add_field("file", wav_buffer, filename="audio.wav", content_type="audio/wav")
     form.add_field("model", WHISPER_MODEL)
     form.add_field("language", WHISPER_LANGUAGE)
 
@@ -1219,11 +1647,7 @@ async def transcribe_file(file: UploadFile = File(...)):
 
 
 # ---------------------------------------------------------------------------
-# SOAP Note Generation via RAGFlow or LLM fallback
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# SOAP Scoring — LLM-as-judge using existing Mistral (no external deps)
+# SOAP Note Generation + Scoring
 # ---------------------------------------------------------------------------
 
 SOAP_SCORE_PROMPT = """Du bewertest eine SOAP-Notiz, die aus einem medizinischen Diktat-Transkript generiert wurde.
@@ -1261,10 +1685,10 @@ async def _score_soap(transcript: str, soap: dict) -> dict:
 
     prompt = SOAP_SCORE_PROMPT.format(
         transcript=transcript,
-        S=soap.get("S", ""),
-        O=soap.get("O", ""),
-        A=soap.get("A", ""),
-        P=soap.get("P", ""),
+        S=soap.get("subjective", ""),
+        O=soap.get("objective", ""),
+        A=soap.get("assessment", ""),
+        P=soap.get("plan", ""),
     )
 
     result = await _call_llm(
@@ -1657,13 +2081,53 @@ async def _generate_soap_ragflow(text: str, agent_id: str) -> dict | None:
         if split:
             return split
 
-        # Last resort — put everything in S so it's visible
+        # Last resort — put everything in subjective so it's visible
         log.info("RAGFlow response is not JSON and has no SOAP headers, returning as raw text")
-        return {"S": answer, "O": "", "A": "", "P": "", "raw_agent_output": True}
+        return {"subjective": answer, "objective": "", "assessment": "", "plan": "", "raw_agent_output": True}
+
+
+def _build_refinement_context(soap_fields: dict, dirty_fields: set) -> str:
+    """Build a refinement context block for the LLM prompt.
+
+    Sections in dirty_fields are marked LOCKED (doctor confirmed).
+    Other sections are marked AUTO (LLM should update freely).
+    Returns empty string if no fields have content yet.
+    """
+    has_content = any(v.strip() for v in soap_fields.values())
+    if not has_content:
+        return ""
+
+    lines = [
+        "## REFINEMENT CONTEXT",
+        "Sections marked AUTO: update freely with new transcript content.",
+        "Sections marked LOCKED: confirmed by the physician — preserve exactly, do not modify.",
+        "",
+    ]
+    for field in ("subjective", "objective", "assessment", "plan"):
+        status = "LOCKED" if field in dirty_fields else "AUTO"
+        content = soap_fields.get(field, "").strip() or "(empty)"
+        lines.append(f"### {field} [{status}]")
+        lines.append(content)
+        lines.append("")
+    return "\n".join(lines)
+
+
+async def _generate_soap_llm_with_context(
+    text: str,
+    soap_fields: dict,
+    dirty_fields: set,
+) -> dict | None:
+    """Generate SOAP with refinement context — used for live SOAP updates."""
+    context_block = _build_refinement_context(soap_fields, dirty_fields)
+    prompt = (SOAP_GENERATION_PROMPT + "\n\n" + context_block) if context_block else SOAP_GENERATION_PROMPT
+    result = await _call_llm(prompt, text, http_session, timeout=30.0, label="LLM-SOAP", max_tokens=2048)
+    if not result:
+        return None
+    return _parse_soap_json(result)
 
 
 async def _generate_soap_llm(text: str) -> dict | None:
-    """Fall back to direct Mistral call for SOAP structuring."""
+    """Direct Mistral call for SOAP structuring — used by the manual generate button (no context)."""
     result = await _call_llm(
         SOAP_GENERATION_PROMPT, text, http_session,
         timeout=30.0, label="LLM-SOAP", max_tokens=2048,
@@ -1683,10 +2147,10 @@ def _parse_soap_text(text: str) -> dict | None:
     # Normalised header patterns (case-insensitive)
     patterns = [
         # "S:", "**S:**", "## S", "S -", "S.", "Subjektiv:", etc.
-        (r'(?:^|\n)\s*(?:\*{1,2})?(?:S|Subjektiv|Subjective)(?:\*{1,2})?\s*[:\-\.]\s*', "S"),
-        (r'(?:^|\n)\s*(?:\*{1,2})?(?:O|Objektiv|Objective)(?:\*{1,2})?\s*[:\-\.]\s*', "O"),
-        (r'(?:^|\n)\s*(?:\*{1,2})?(?:A|Assessment|Beurteilung)(?:\*{1,2})?\s*[:\-\.]\s*', "A"),
-        (r'(?:^|\n)\s*(?:\*{1,2})?(?:P|Plan|Procedere)(?:\*{1,2})?\s*[:\-\.]\s*', "P"),
+        (r'(?:^|\n)\s*(?:\*{1,2})?(?:S|Subjektiv|Subjective)(?:\*{1,2})?\s*[:\-\.]\s*', "subjective"),
+        (r'(?:^|\n)\s*(?:\*{1,2})?(?:O|Objektiv|Objective)(?:\*{1,2})?\s*[:\-\.]\s*', "objective"),
+        (r'(?:^|\n)\s*(?:\*{1,2})?(?:A|Assessment|Beurteilung)(?:\*{1,2})?\s*[:\-\.]\s*', "assessment"),
+        (r'(?:^|\n)\s*(?:\*{1,2})?(?:P|Plan|Procedere)(?:\*{1,2})?\s*[:\-\.]\s*', "plan"),
     ]
 
     # Find each section's start position
@@ -1704,7 +2168,7 @@ def _parse_soap_text(text: str) -> dict | None:
     positions.sort(key=lambda x: x[0])
 
     # Extract content between sections
-    result = {"S": "", "O": "", "A": "", "P": ""}
+    result = {"subjective": "", "objective": "", "assessment": "", "plan": ""}
     for i, (start, field) in enumerate(positions):
         end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
         # Walk back from end to find the start of the next header
@@ -1719,7 +2183,7 @@ def _parse_soap_text(text: str) -> dict | None:
         result[field] = content.strip()
 
     log.info("Parsed SOAP from free text: S=%d chars, O=%d chars, A=%d chars, P=%d chars",
-             len(result["S"]), len(result["O"]), len(result["A"]), len(result["P"]))
+             len(result["subjective"]), len(result["objective"]), len(result["assessment"]), len(result["plan"]))
     return result
 
 
@@ -1782,10 +2246,10 @@ def _build_soap_from_medical_facts(data: dict) -> dict:
         p_parts.append(f"Verlaufskontrolle: {_join(data['follow_up_instructions'])}")
 
     return {
-        "S": "\n".join(s_parts),
-        "O": "\n".join(o_parts),
-        "A": "\n".join(a_parts),
-        "P": "\n".join(p_parts),
+        "subjective": "\n".join(s_parts),
+        "objective":  "\n".join(o_parts),
+        "assessment": "\n".join(a_parts),
+        "plan":       "\n".join(p_parts),
     }
 
 
@@ -1828,19 +2292,19 @@ def _parse_soap_json(raw: str) -> dict | None:
     # Direct SOAP format — short keys (S/O/A/P)
     if any(k in data for k in ("S", "O", "A", "P")):
         return {
-            "S": _soap_value_to_str(data.get("S", "")),
-            "O": _soap_value_to_str(data.get("O", "")),
-            "A": _soap_value_to_str(data.get("A", "")),
-            "P": _soap_value_to_str(data.get("P", "")),
+            "subjective": _soap_value_to_str(data.get("S", "")),
+            "objective":  _soap_value_to_str(data.get("O", "")),
+            "assessment": _soap_value_to_str(data.get("A", "")),
+            "plan":       _soap_value_to_str(data.get("P", "")),
         }
 
     # Long keys (subjective/objective/assessment/plan)
     if any(k in data for k in ("subjective", "objective", "assessment", "plan")):
         return {
-            "S": _soap_value_to_str(data.get("subjective", "")),
-            "O": _soap_value_to_str(data.get("objective", "")),
-            "A": _soap_value_to_str(data.get("assessment", "")),
-            "P": _soap_value_to_str(data.get("plan", "")),
+            "subjective": _soap_value_to_str(data.get("subjective", "")),
+            "objective":  _soap_value_to_str(data.get("objective", "")),
+            "assessment": _soap_value_to_str(data.get("assessment", "")),
+            "plan":       _soap_value_to_str(data.get("plan", "")),
         }
 
     # Medical Facts format (flat or nested)

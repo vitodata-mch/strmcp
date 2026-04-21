@@ -70,6 +70,20 @@ export interface RagflowAgent {
 export type SoapField = "subjective" | "objective" | "assessment" | "plan";
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+const VOICE_CMDS_KEY = "dictation_voice_commands";
+const DIFF_HOTKEY_KEY = "dictation_diff_hotkey";
+
+export interface VoiceCommand {
+  spoken: string;
+  replacement: string;
+}
+
+export interface TranscriptCorrection {
+  id: string;
+  original: string;
+  corrected: string;
+  offset: number;
+}
 const EMPTY_LEVELS = new Array(12).fill(0) as number[];
 const LEVEL_THROTTLE_MS = 50; // ~20fps is plenty for a visual meter
 
@@ -113,6 +127,20 @@ export function useDictation() {
   const [comparison, setComparison]   = useState<CompareTranscript | null>(null);
   const [whisperOnly, setWhisperOnlyState] = useState(false);
   const [liveSoap, setLiveSoapState] = useState(false);
+
+  // Dirty field tracking + LLM shadow copy for diff/suggestion display
+  const [dirtyFields, setDirtyFields] = useState<Set<SoapField>>(new Set());
+  const [llmFields, setLlmFields] = useState<Record<SoapField, string>>({
+    subjective: "", objective: "", assessment: "", plan: "",
+  });
+
+  // Transcript corrections — LLM diffs applied to committed text
+  const [corrections, setCorrections] = useState<TranscriptCorrection[]>([]);
+  const [diffMode, setDiffMode] = useState(false);
+  const [diffHotkey, setDiffHotkeyState] = useState<string>(() =>
+    typeof window !== "undefined" ? (localStorage.getItem(DIFF_HOTKEY_KEY) ?? "d") : "d"
+  );
+  const soapFieldDebounceRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [ragflowAgents, setRagflowAgents] = useState<RagflowAgent[]>([]);
   const [ragflowConnected, setRagflowConnected] = useState<boolean | null>(null); // null = checking
   const [selectedAgent, setSelectedAgentState] = useState<string>("");
@@ -120,6 +148,11 @@ export function useDictation() {
     setSelectedAgentState(id);
     if (typeof window !== "undefined") localStorage.setItem("selectedAgent", id);
   }, []);
+  const [voiceCommands, setVoiceCommandsState] = useState<VoiceCommand[]>(() => {
+    if (typeof window === "undefined") return [];
+    try { return JSON.parse(localStorage.getItem(VOICE_CMDS_KEY) ?? "[]"); } catch { return []; }
+  });
+
   const [chunks, setChunks]           = useState(0);
   const [whisperCalls, setWhisperCalls] = useState(0);
   const [duration, setDuration]       = useState(0);
@@ -146,7 +179,14 @@ export function useDictation() {
   const ensureSocket = useCallback(() => {
     if (socketRef.current?.connected) return socketRef.current;
     const s = io(getBackendUrl(), { transports: ["websocket", "polling"], reconnection: true });
-    s.on("connect",       () => setConnected(true));
+    s.on("connect", () => {
+      setConnected(true);
+      // Restore custom voice commands on reconnect
+      try {
+        const stored = localStorage.getItem(VOICE_CMDS_KEY);
+        if (stored) s.emit("set_voice_commands", { commands: JSON.parse(stored) });
+      } catch {}
+    });
     s.on("disconnect",    () => setConnected(false));
     s.on("connect_error", (err) => {
       console.error("Socket.IO Verbindungsfehler:", err.message);
@@ -174,15 +214,28 @@ export function useDictation() {
       }, 100);
     });
     // Live SOAP updates during streaming
-    s.on("soap_update", (data: { S?: string; O?: string; A?: string; P?: string; duration_ms?: number }) => {
+    s.on("soap_update", (data: {
+      subjective?: string; objective?: string; assessment?: string; plan?: string;
+      dirty_protected?: string[]; duration_ms?: number;
+    }) => {
       if (soapTimerRef.current) { clearInterval(soapTimerRef.current); soapTimerRef.current = null; }
       setSoapGenerating(false);
-      setFields({
-        subjective: data.S ?? "",
-        objective:  data.O ?? "",
-        assessment: data.A ?? "",
-        plan:       data.P ?? "",
-      });
+      const incoming: Record<SoapField, string> = {
+        subjective: data.subjective ?? "",
+        objective:  data.objective  ?? "",
+        assessment: data.assessment ?? "",
+        plan:       data.plan       ?? "",
+      };
+      // Always store the LLM version for diff/suggestion display
+      setLlmFields(incoming);
+      // Only overwrite fields the doctor has not manually edited
+      const protectedFields = new Set(data.dirty_protected ?? []);
+      setFields((prev) => ({
+        subjective: protectedFields.has("subjective") ? prev.subjective : incoming.subjective,
+        objective:  protectedFields.has("objective")  ? prev.objective  : incoming.objective,
+        assessment: protectedFields.has("assessment") ? prev.assessment : incoming.assessment,
+        plan:       protectedFields.has("plan")       ? prev.plan       : incoming.plan,
+      }));
       if (data.duration_ms != null) setSoapDuration(data.duration_ms);
     });
     // Comparison events (Model A vs B)
@@ -218,6 +271,15 @@ export function useDictation() {
     });
     s.on("transcription_error", (data: TranscriptionErrorEvent) => {
       console.error("Transkriptions-Fehler:", data.error);
+    });
+    // LLM applied a correction diff to committed text
+    s.on("transcript_correction", (data: { corrections: TranscriptCorrection[] }) => {
+      setCorrections((prev) => [...prev, ...data.corrections]);
+    });
+    // A correction was reverted — server sends back updated full_text
+    s.on("transcript_corrected", (data: { full_text: string; reverted_id: string }) => {
+      if (data.full_text) setFullText(data.full_text);
+      setCorrections((prev) => prev.filter((c) => c.id !== data.reverted_id));
     });
     socketRef.current = s;
     return s;
@@ -257,8 +319,22 @@ export function useDictation() {
       ctxRef.current?.close();
       streamRef.current?.getTracks().forEach((t) => t.stop());
       if (timerRef.current) clearInterval(timerRef.current);
+      if (soapTimerRef.current) clearInterval(soapTimerRef.current);
+      Object.values(soapFieldDebounceRef.current).forEach(clearTimeout);
     };
   }, [ensureSocket]);
+
+  // Global diff hotkey — Alt+<key> toggles inline diff view
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.altKey && e.key === diffHotkey) {
+        e.preventDefault();
+        setDiffMode((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [diffHotkey]);
 
   // ─── Mic recording ────────────────────────────────────────────────────────
 
@@ -383,8 +459,8 @@ export function useDictation() {
           resolve({ ok: false, error: data.error });
         };
 
-        socket.on("file_stream_done",    onDone);
-        socket.on("transcription_error", onError);
+        socket.once("file_stream_done",    onDone);
+        socket.once("transcription_error", onError);
         socket.emit("transcribe_file_stream", buffer);
       });
     },
@@ -426,10 +502,59 @@ export function useDictation() {
   const clearTranscript = useCallback(() => {
     setTranscript({ confirmed: "", provisional: "" });
     setFullText("");
+    setCorrections([]);
+  }, []);
+
+  const clearComparison = useCallback(() => {
+    setComparison(null);
+  }, []);
+
+  const clearAll = useCallback(() => {
+    setTranscript({ confirmed: "", provisional: "" });
+    setFullText("");
+    setCorrections([]);
+    setComparison(null);
+  }, []);
+
+  const revertCorrection = useCallback((id: string) => {
+    socketRef.current?.emit("revert_correction", { id });
+  }, []);
+
+  const editCorrection = useCallback((id: string, newText: string) => {
+    // Optimistic update: remove from list and patch fullText locally
+    setCorrections((prev) => {
+      const corr = prev.find((c) => c.id === id);
+      if (corr) {
+        setFullText((ft) => ft.replace(corr.corrected, newText));
+      }
+      return prev.filter((c) => c.id !== id);
+    });
+  }, []);
+
+  const setVoiceCommands = useCallback((commands: VoiceCommand[]) => {
+    setVoiceCommandsState(commands);
+    localStorage.setItem(VOICE_CMDS_KEY, JSON.stringify(commands));
+    socketRef.current?.emit("set_voice_commands", { commands });
   }, []);
 
   const setFieldText = useCallback((field: SoapField, text: string) => {
     setFields((prev) => ({ ...prev, [field]: text }));
+    setDirtyFields((prev) => { const s = new Set(prev); s.add(field); return s; });
+    // Debounced sync to backend so it can use the latest content in the next LLM call
+    clearTimeout(soapFieldDebounceRef.current[field]);
+    soapFieldDebounceRef.current[field] = setTimeout(() => {
+      socketRef.current?.emit("update_soap_field", { field, text });
+    }, 300);
+  }, []);
+
+  const unlockField = useCallback((field: SoapField) => {
+    setDirtyFields((prev) => { const s = new Set(prev); s.delete(field); return s; });
+    socketRef.current?.emit("unlock_soap_field", { field });
+  }, []);
+
+  const setDiffHotkey = useCallback((key: string) => {
+    setDiffHotkeyState(key);
+    localStorage.setItem(DIFF_HOTKEY_KEY, key);
   }, []);
 
   const clearField = useCallback(() => {
@@ -441,6 +566,7 @@ export function useDictation() {
   const generateSoap = useCallback(
     async (text: string, agentId?: string): Promise<SoapResult> => {
       if (!text.trim()) return { ok: false, error: "Kein Text vorhanden" };
+      if (soapTimerRef.current) return { ok: false, error: "Bereits in Bearbeitung" };
       // Start live timer
       setSoapGenerating(true);
       soapStartRef.current = performance.now();
@@ -462,10 +588,10 @@ export function useDictation() {
         const data = await resp.json();
         if (data.error) return { ok: false, error: data.error };
         setFields({
-          subjective: data.S ?? "",
-          objective:  data.O ?? "",
-          assessment: data.A ?? "",
-          plan:       data.P ?? "",
+          subjective: data.subjective ?? "",
+          objective:  data.objective  ?? "",
+          assessment: data.assessment ?? "",
+          plan:       data.plan       ?? "",
         });
         if (data.scores) setSoapScores(data.scores);
         if (data.duration_ms != null) setSoapDuration(data.duration_ms);
@@ -528,8 +654,22 @@ export function useDictation() {
     level,
     toggleRecording,
     clearTranscript,
+    clearComparison,
+    clearAll,
+    voiceCommands,
+    setVoiceCommands,
     clearField,
     setFieldText,
+    dirtyFields,
+    unlockField,
+    llmFields,
+    diffMode,
+    setDiffMode,
+    diffHotkey,
+    setDiffHotkey,
+    corrections,
+    revertCorrection,
+    editCorrection,
     streamFile,
     stopFileStream,
     generateSoap,

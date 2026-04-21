@@ -2,7 +2,7 @@
 
 ## Stack
 
-- Next.js 16 (App Router, TypeScript)
+- Next.js 15 (App Router, TypeScript) — pinned to ^15.5.14 (Next.js 16 crashes)
 - React 19
 - Tailwind CSS 4 (PostCSS)
 - shadcn/ui (base-nova style, lucide icons)
@@ -15,7 +15,7 @@ npm install
 npm run dev    # http://localhost:3000
 ```
 
-Backend must be running on :8003 — Next.js rewrites proxy all `/socket.io/*`, `/v1/*`, and `/health` requests there.
+Backend must be running on :8003 — Next.js rewrites proxy all `/socket.io/*`, `/v1/*`, and `/health` requests there. Backend URL configurable via `BACKEND_URL` env var.
 
 ## Structure
 
@@ -47,13 +47,54 @@ Themes are defined as CSS variable maps in `lib/themes.ts` and applied to `:root
 ## Key Hook: useDictation()
 
 Located in `lib/use-dictation.ts`. Returns:
-- `connected`, `recording` — connection/recording state
-- `fields` — Record<SoapField, {confirmed, provisional}> for S/O/A/P
-- `activeField`, `setActiveField` — which SOAP tab is active
-- `toggleRecording()` — start/stop mic
+
+### Connection / recording state
+- `connected`, `recording`, `streaming` — status flags
+- `toggleRecording()` — start/stop mic dictation
 - `streamFile(file)` — stream audio file through the sliding-window pipeline
-- `clearField()` — clear active field text
-- `chunks`, `whisperCalls`, `duration`, `streamDuration`, `level` — stats
+- `stopFileStream()` — abort file streaming
+- `streamDuration`, `streamElapsed`, `streamStatus` — file stream progress
+
+### Transcription
+- `transcript` — `{confirmed, provisional}` for the current window
+- `fullText` — full accumulated corrected transcription
+- `corrections: TranscriptCorrection[]` — active LLM correction diffs
+- `clearTranscript()` — clear transcript text only
+- `revertCorrection(id)` — revert a specific LLM correction
+- `editCorrection(id, newText)` — accept correction with edit
+- `diffMode`, `setDiffMode` — correction highlight display mode
+- `diffHotkey`, `setDiffHotkey` — hotkey for shift-to-reveal corrections
+
+### SOAP fields
+- `fields` — `Record<SoapField, string>` for subjective/objective/assessment/plan
+- `activeField`, `setActiveField` — which SOAP tab is active
+- `clearField()` — clear active SOAP field
+- `setFieldText(field, text)` — set SOAP field content
+- `dirtyFields` — fields manually edited by doctor (locked from LLM updates)
+- `unlockField(field)` — re-enable a locked field for LLM updates
+- `llmFields` — latest LLM-generated field values
+- `generateSoap()` — trigger manual SOAP generation
+- `saveGoldStandard(name)` — save current transcript + SOAP as gold standard
+- `soapGenerating`, `soapDuration`, `soapScores` — generation state
+- `liveSoap`, `toggleLiveSoap()` — auto-SOAP during dictation
+
+### Compare mode
+- `compareMode`, `compareEnabled`, `toggleCompareMode()` — Model A vs B
+- `comparison: CompareTranscript | null` — side-by-side corrected text from both models
+- `clearComparison()` — clear comparison panel only
+
+### Voice commands
+- `voiceCommands`, `setVoiceCommands` — custom per-session spoken→replacement mappings
+
+### Clear / reset
+- `clearTranscript()` — clears transcript + corrections (not comparison)
+- `clearComparison()` — clears comparison panel
+- `clearAll()` — clears transcript + corrections + comparison
+
+### Stats / misc
+- `chunks`, `whisperCalls`, `duration`, `level` — stats
+- `whisperOnly`, `toggleWhisperOnly()` — skip LLM correction
+- `ragflowAgents`, `ragflowConnected`, `selectedAgent`, `setSelectedAgent` — RAGFlow
 
 ## shadcn/ui Components Installed
 
@@ -67,3 +108,4 @@ To add more: `npx shadcn@latest add <component-name>`
 - Client components use `"use client"` directive
 - German UI text throughout
 - Use lucide-react for icons
+- SOAP field names: always `subjective/objective/assessment/plan` — never S/O/A/P abbreviations
